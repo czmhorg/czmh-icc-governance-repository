@@ -101,6 +101,12 @@ _gh-governance-reconcile-repo() {
     return 1
   fi
 
+  _gh-governance-apply-policy-and-state "$_repo_path" "$_name" "$_branch" "$_key" \
+    _removed _adopted || return 1
+
+  # Warningy se zjišťují až po aplikaci a odebrání – popisují stav na konci
+  # běhu (tým odebraný tímto během dle diffu není „přiřazený navíc").
+
   # Warning: tým přiřazený navíc (ručně přiřazený nad rámec repository_teams;
   # neodebírá se – v žádné verzi konfigurace nebyl, v diffu se neobjeví).
   _expected=$(_gh-repository-policy-expected-teams "$_key") || return 1
@@ -120,9 +126,6 @@ _gh-governance-reconcile-repo() {
     [[ -n "$_id" && "$_rsname" != mh-policy-* ]] && \
       _gh-governance-report-add warning "ruleset prirazeny navic" "$_repo_path" "ruleset '$_rsname'"
   done <<< "$_listing"
-
-  _gh-governance-apply-policy-and-state "$_repo_path" "$_name" "$_branch" "$_key" \
-    _removed _adopted || return 1
 
   if [[ "$_adopted" == true ]]; then
     _gh-governance-report-add info "adopce repa" "$_repo_path" \
