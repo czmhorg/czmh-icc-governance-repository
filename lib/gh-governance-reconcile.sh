@@ -9,7 +9,8 @@
 # Závislosti: gh-common-defs.sh, lib/gh-conf.sh, lib/gh-repository-policy.sh,
 # lib/gh-governance-state.sh, lib/gh-governance-repo-ops.sh
 # (_gh-governance-ghp-topics, _gh-governance-apply-policy-and-state),
-# lib/gh-governance-report.sh.
+# lib/gh-governance-report.sh, lib/gh-governance-manifest.sh (rebuild),
+# lib/gh-governance-issue.sh (track-delete sweep; jen v GitHub Actions).
 [[ -n "${_GH_GOVERNANCE_RECONCILE_LOADED:-}" ]] && \
   declare -F _gh-governance-classify >/dev/null && return 0
 _GH_GOVERNANCE_RECONCILE_LOADED=1
@@ -140,6 +141,79 @@ _gh-governance-reconcile-repo() {
   return 0
 }
 
+_gh-governance-reconcile-dead-pointers() {
+  # Vypíše názvy ukazatelů state/, jejichž repo není ve výpisu rep organizace
+  # (mrtvý ukazatel – smazání minulo track-delete). Dotfiles (completion
+  # manifest, .gitkeep) glob `*` přirozeně přeskakuje. Čistá offline funkce.
+  # Použití: _gh-governance-reconcile-dead-pointers <listing_file>
+  local _listing_file="$1" _root _file _name _rest
+  local -A _org_repos=()
+  _root=$(_gh-governance-checkout-root) || return 1
+  [[ -d "$_root/state" ]] || return 0
+  while IFS=$'\t' read -r _name _rest; do
+    [[ -n "$_name" ]] && _org_repos["$_name"]=1
+  done < "$_listing_file"
+  for _file in "$_root/state/"*; do
+    [[ -f "$_file" ]] || continue
+    _name="${_file##*/}"
+    [[ -v _org_repos["$_name"] ]] || printf '%s\n' "$_name"
+  done
+  return 0
+}
+
+_gh-governance-track-delete-sweep() {
+  # Pojistka za workflow track-delete: projde otevřené track-delete issues
+  # starší než 1 den. Repo už neexistuje → idempotentní úklid (ukazatel,
+  # řádek manifestu), zavření issue a info item; repo stále existuje → error
+  # `zaseknute smazani repa` + komentář; nevalidní tělo → zavření not_planned.
+  # Běží jen v GitHub Actions (lokální běh nemá issues RW ani jq).
+  # Použití: _gh-governance-track-delete-sweep <listing_file>
+  local _listing_file="$1" _cutoff _issues _number _created _created_s _body
+  local _name _rest
+  local -A _org_repos=()
+  [[ "${GITHUB_ACTIONS:-}" == true ]] || return 0
+  _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_GOVERNANCE_REPO || return 1
+  while IFS=$'\t' read -r _name _rest; do
+    [[ -n "$_name" ]] && _org_repos["$_name"]=1
+  done < "$_listing_file"
+  _cutoff=$(( $(date +%s) - 86400 ))
+  _issues=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh issue list \
+    --repo "$GITHUB_ORG/$GH_GOVERNANCE_REPO" --label track-delete --state open \
+    --json number,createdAt --jq '.[] | [(.number|tostring), .createdAt] | @tsv') || {
+    echo "Chyba: Výpis otevřených track-delete issues selhal." >&2
+    return 1
+  }
+  while IFS=$'\t' read -r _number _created; do
+    [[ -n "$_number" ]] || continue
+    _created_s=$(date -d "$_created" +%s 2>/dev/null) || continue
+    (( _created_s <= _cutoff )) || continue
+    _body=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh issue view "$_number" \
+      --repo "$GITHUB_ORG/$GH_GOVERNANCE_REPO" --json body --jq .body) || continue
+    local -A _td=()
+    if ! _gh-governance-track-delete-body-parse "$_body" _td; then
+      _gh-governance-issue-close-rejected "$_number" "${_td[reject]:-unexpected_line}" || true
+      continue
+    fi
+    if [[ -v _org_repos["${_td[repo_name]}"] ]]; then
+      _gh-governance-report-add error "zaseknute smazani repa" \
+        "${GITHUB_ORG}/${_td[repo_name]}" \
+        "track-delete issue #$_number starší než 1 den, repo stále existuje – zamítnuté/zaseknuté smazání, ruční kontrola"
+      GH_HOST="$GITHUB_ORG_HOSTNAME" gh issue comment "$_number" \
+        --repo "$GITHUB_ORG/$GH_GOVERNANCE_REPO" \
+        --body "Repo stále existuje více než 1 den po žádosti o smazání – zamítnuté nebo zaseknuté smazání, nutná ruční kontrola." \
+        >/dev/null || true
+    else
+      _gh-governance-state-remove "${_td[repo_name]}" || continue
+      _gh-governance-manifest-remove "${_td[project_key]}" "${_td[gh_name]}" || continue
+      _gh-governance-issue-close-done "$_number" \
+        "Repo zaniklo; ukazatel /state/ i řádek completion manifestu uklizeny nočním reconcile." || true
+      _gh-governance-report-add info "track-delete vyrizen reconcilem" \
+        "${GITHUB_ORG}/${_td[repo_name]}" "issue #$_number zavřeno, artefakty uklizeny"
+    fi
+  done <<< "$_issues"
+  return 0
+}
+
 _gh-governance-reconcile-run() {
   # Celý běh reconciliace: průchod výpisem rep organizace, klasifikace,
   # per-repo reconciliace (selhání jednoho repa běh nezastaví), počty rep
@@ -148,7 +222,7 @@ _gh-governance-reconcile-run() {
   # rc != 0 jen při selhání infrastruktury běhu (výpis rep, checkout).
   # Použití: _gh-governance-reconcile-run
   local _listing _name _archived _branch _topics _extra _class _value _err_file
-  local _key _n _level _subset
+  local _key _n _level _subset _listing_file _dead _manifest_added=0 _manifest_removed=0
   local -A _count_archived=() _count_live=()
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX GH_PROJECT_TOPIC_PREFIX || return 1
   _gh-governance-run-sha >/dev/null || return 1
@@ -211,6 +285,34 @@ _gh-governance-reconcile-run() {
       esac
     done
   done
+
+  # Přestavba completion manifestu z už načteného listingu (žádné další API)
+  # a navazující kontroly nad týmž listingem; vše jede jedním pushem níže.
+  _listing_file=$(mktemp) || return 1
+  printf '%s\n' "$_listing" > "$_listing_file"
+  if _gh-governance-manifest-rebuild "$_listing_file" _manifest_added _manifest_removed; then
+    if (( _manifest_added > 0 || _manifest_removed > 0 )); then
+      _gh-governance-report-add info "obnoven completion manifest" \
+        "${GITHUB_ORG}/${GH_GOVERNANCE_REPO}" "+${_manifest_added}/−${_manifest_removed} řádků"
+    fi
+  else
+    _gh-governance-report-add error "neuspesna reconciliace repa" \
+      "${GITHUB_ORG}/${GH_GOVERNANCE_REPO}" "přestavba completion manifestu selhala"
+  fi
+
+  # Mrtvé ukazatele state/ (repo v organizaci už neexistuje): jen hlášení,
+  # ukazatel se neodstraňuje (viz defs/defs.md).
+  while IFS= read -r _dead; do
+    [[ -n "$_dead" ]] || continue
+    _gh-governance-report-add warning "mrtvy ukazatel state" "$_dead" \
+      "ukazatel state/ existuje, repo v organizaci ne (smazání minulo track-delete)"
+  done <<< "$(_gh-governance-reconcile-dead-pointers "$_listing_file")"
+
+  # Pojistka za track-delete (guard na GitHub Actions je uvnitř).
+  _gh-governance-track-delete-sweep "$_listing_file" || \
+    _gh-governance-report-add error "neuspesna reconciliace repa" \
+      "${GITHUB_ORG}/${GH_GOVERNANCE_REPO}" "track-delete sweep selhal"
+  rm -f "$_listing_file"
 
   # Jeden commit+push posunutých ukazatelů na konci běhu; selhání pushe je
   # error v reportu, aplikované změny se nevrací (ukazatel smí být „starší").

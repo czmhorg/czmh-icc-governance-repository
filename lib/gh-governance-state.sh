@@ -80,8 +80,11 @@ _gh-governance-state-push() {
   # Commitne všechny změny pod state/ jedním commitem a pushne; při odmítnutí
   # pushe rebase-retry (max 5×). Při konfliktu vyhrává vzdálená verze (-X ours
   # při rebase) – ukazatel smí být „starší", nikdy „novější" než realita;
-  # repo dokonverguje příští běh. Bez změn nedělá nic. Selhání pushe nevrací
-  # už aplikované změny – volající ho reportuje jako error.
+  # repo dokonverguje příští běh. Sdílený completion manifest ale ztrátu
+  # nesnese: je-li načten manifest modul, po každém rebase se evidované úpravy
+  # manifestu idempotentně přehrají znovu (replay) a commit doplní. Bez změn
+  # nedělá nic. Selhání pushe nevrací už aplikované změny – volající ho
+  # reportuje jako error.
   # Použití: _gh-governance-state-push <commit message>
   local _msg="$1" _root _attempt
   _root=$(_gh-governance-checkout-root) || return 1
@@ -100,9 +103,35 @@ _gh-governance-state-push() {
       echo "Chyba: Rebase při pushi ukazatelů /state/ selhal." >&2
       return 1
     }
+    if declare -F _gh-governance-manifest-replay >/dev/null; then
+      _gh-governance-manifest-replay || {
+        echo "Chyba: Replay úprav completion manifestu po rebase selhal." >&2
+        return 1
+      }
+      git -C "$_root" add -A state/ || return 1
+      if ! git -C "$_root" diff --cached --quiet; then
+        # Rebase mohl náš commit zahodit jako prázdný (HEAD == upstream) –
+        # pak replay změny patří do nového commitu, jinak amend toho našeho.
+        if [[ "$(git -C "$_root" rev-parse HEAD)" == "$(git -C "$_root" rev-parse '@{u}' 2>/dev/null)" ]]; then
+          git -C "$_root" commit -m "$_msg" >/dev/null || return 1
+        else
+          git -C "$_root" commit --amend --no-edit >/dev/null || return 1
+        fi
+      fi
+    fi
   done
   echo "Chyba: Push ukazatelů /state/ selhal po 5 pokusech." >&2
   return 1
+}
+
+_gh-governance-state-remove() {
+  # Odstraní ukazatel state/<ghRepoName> z pracovní kopie (zaniklé repo,
+  # track-delete); idempotentní. Commit+push dělá _gh-governance-state-push
+  # (`git add -A state/` smazání zachytí).
+  # Použití: _gh-governance-state-remove <ghRepoName>
+  local _repo_name="$1" _root
+  _root=$(_gh-governance-checkout-root) || return 1
+  rm -f "$_root/state/$_repo_name"
 }
 
 _gh-governance-conf-teams-at-commit() {

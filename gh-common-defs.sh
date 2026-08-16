@@ -48,8 +48,22 @@ _GH_GHNAME_REGEX='^[a-z0-9][a-z0-9._-]*$'
 # Editor pro gh-open (bez --web). Výchozí: code (VS Code).
 # GH_EDITOR=code
 
-# Maximální stáří completion cache v minutách před background refreshem (výchozí: 24 h).
-GH_COMPLETION_CACHE_TTL_MIN=240
+# Repo, jehož issue workflow provádí mazání rep (axiom Práva členů organizace,
+# defs/defs.md) – černá skříňka spravovaná organizací; klientem je gh-delete.
+: "${GH_DELETE_HELPER_REPO:=czmhorg/delete-repository}"
+
+# Poll existence repa ve workflow track-delete (defs/defs-governance-repo.md):
+# celkový timeout v minutách a interval mezi dotazy v sekundách.
+: "${GH_GOVERNANCE_TRACK_DELETE_TIMEOUT_MIN:=10}"
+: "${GH_GOVERNANCE_TRACK_DELETE_INTERVAL_S:=30}"
+
+# Maximální stáří snapshotu completion cache v minutách před background
+# refreshem (viz gh-completion-cache-design.md).
+: "${GH_COMPLETION_CACHE_TTL_MIN:=15}"
+
+# Minimální odstup pokusů o refresh completion cache v minutách
+# (single-flight: souběžné TABy nestahují paralelně, selhání se neopakuje hned).
+: "${GH_COMPLETION_REFRESH_BACKOFF_MIN:=2}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Lokální uživatelské přepsání (gitignorováno).

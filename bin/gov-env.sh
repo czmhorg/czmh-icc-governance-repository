@@ -23,6 +23,7 @@ fi
 source "$_GOV_ROOT/gh-common-defs.sh"
 source "$_GOV_ROOT/lib/gh-repository-policy.sh"
 source "$_GOV_ROOT/lib/gh-governance-state.sh"
+source "$_GOV_ROOT/lib/gh-governance-manifest.sh"
 source "$_GOV_ROOT/lib/gh-governance-repo-ops.sh"
 source "$_GOV_ROOT/lib/gh-governance-issue.sh"
 source "$_GOV_ROOT/lib/gh-governance-report.sh"

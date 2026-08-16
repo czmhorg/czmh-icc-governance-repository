@@ -5,7 +5,7 @@
 # (návrh docs/navrh/governance/governance-repo.md). Volají je entry skripty
 # governance/bin/gov-*.sh – lokálně (krok 2 PoC) i z workflows gov repa.
 # Závislosti: gh-common-defs.sh, lib/gh-conf.sh, lib/gh-repository-policy.sh,
-# lib/gh-governance-state.sh.
+# lib/gh-governance-state.sh, lib/gh-governance-manifest.sh.
 [[ -n "${_GH_GOVERNANCE_REPO_OPS_LOADED:-}" ]] && \
   declare -F _gh-governance-new >/dev/null && return 0
 _GH_GOVERNANCE_REPO_OPS_LOADED=1
@@ -197,6 +197,7 @@ _gh-governance-new() {
 
   _gh-governance-apply-policy-and-state "$_repo_path" "$_repo_name" "$_branch" "$_key" \
     _removed _adopted || return 1
+  _gh-governance-manifest-upsert "$_key" "$_name" false || return 1
   _gh-governance-state-push "new-repository: $_repo_name" || return 1
   [[ ${#_removed[@]} -gt 0 ]] && \
     printf 'Odebrán tým dle diffu konfigurace: %s\n' "${_removed[@]}"
@@ -205,7 +206,9 @@ _gh-governance-new() {
 
 _gh-governance-archive() {
   # Archivuje spravované nearchivované repo projektu (PATCH archived=true).
-  # Ukazatel posledního aplikovaného stavu se neposouvá – zmrazí se sám.
+  # Ukazatel posledního aplikovaného stavu se neposouvá – zmrazí se sám;
+  # pushuje se jen přepnutí řádku completion manifestu (archived=true,
+  # i pro už archivované repo – konvergence manifestu).
   # Použití: _gh-governance-archive <projectKey> <ghName>
   local _key="$1" _name="$2" _mhn _repo_name _repo_path
   local -A _info=()
@@ -221,12 +224,14 @@ _gh-governance-archive() {
   fi
   _gh-governance-managed-verify "$_repo_path" "$_key" "${_info[topics]}" || return 1
   if [[ "${_info[archived]}" == true ]]; then
-    echo "Repo '$_repo_path' už je archivované – není co dělat."
-    return 0
+    echo "Repo '$_repo_path' už je archivované – jen konverguji completion manifest."
+  else
+    _gh-api-input-retry "repos/$_repo_path" PATCH '{"archived":true}' \
+      "archivace repa '$_repo_path'" || return 1
+    echo "Hotovo: repo '$_repo_path' je archivované."
   fi
-  _gh-api-input-retry "repos/$_repo_path" PATCH '{"archived":true}' \
-    "archivace repa '$_repo_path'" || return 1
-  echo "Hotovo: repo '$_repo_path' je archivované."
+  _gh-governance-manifest-upsert "$_key" "$_name" true || return 1
+  _gh-governance-state-push "archive-repository: $_repo_name" || return 1
 }
 
 _gh-governance-unarchive() {
@@ -264,10 +269,48 @@ _gh-governance-unarchive() {
   fi
   _gh-governance-apply-policy-and-state "$_repo_path" "$_repo_name" "$_branch" "$_key" \
     _removed _adopted || return 1
+  _gh-governance-manifest-upsert "$_key" "$_name" false || return 1
   _gh-governance-state-push "unarchive-repository: $_repo_name" || return 1
   [[ "$_adopted" == true ]] && \
     echo "Adopce repa: ukazatel posledního aplikovaného stavu založen, nic se neodebíralo."
   [[ ${#_removed[@]} -gt 0 ]] && \
     printf 'Odebrán tým dle diffu konfigurace: %s\n' "${_removed[@]}"
   echo "Hotovo: repo '$_repo_path' odpovídá INI konfiguraci projektu '$_key'."
+}
+
+_gh-governance-track-delete() {
+  # Sleduje zánik repa po podané žádosti o smazání (track-delete issue,
+  # defs/defs-governance-repo.md): polluje existenci repa přímým dotazem;
+  # teprve po prokázaném HTTP 404 uklidí ukazatel state/<ghRepoName> i řádek
+  # completion manifestu a pushne. Nic na GitHubu nemaže.
+  # rc 0 = repo zaniklo a úklid proběhl, rc 2 = repo po timeoutu stále
+  # existuje (není selhání), rc 1 = provozní chyba.
+  # Použití: _gh-governance-track-delete <projectKey> <ghName>
+  local _key="$1" _name="$2" _repo_name _repo_path
+  local _timeout_s _elapsed_s=0
+  local -A _info=()
+  _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX || return 1
+  _repo_name=$(_gh-governance-repo-name "$_key" "$_name") || return 1
+  _repo_path="${GITHUB_ORG}/${_repo_name}"
+  _timeout_s=$(( GH_GOVERNANCE_TRACK_DELETE_TIMEOUT_MIN * 60 ))
+  echo "Sleduji zánik repa '$_repo_path' (max ${GH_GOVERNANCE_TRACK_DELETE_TIMEOUT_MIN} min po ${GH_GOVERNANCE_TRACK_DELETE_INTERVAL_S} s)."
+  while :; do
+    # API chyba (rc 1) je neprůkazná – poll pokračuje; úklid smí spustit
+    # jen jednoznačné 404 (rc 0 + exists=false).
+    if _gh-governance-repo-info "$_repo_path" _info \
+        && [[ "${_info[exists]}" == false ]]; then
+      _gh-governance-state-remove "$_repo_name" || return 1
+      _gh-governance-manifest-remove "$_key" "$_name" || return 1
+      _gh-governance-state-push "track-delete: $_repo_name" || return 1
+      echo "Hotovo: repo '$_repo_path' zaniklo, ukazatel i řádek manifestu uklizeny."
+      return 0
+    fi
+    if (( _elapsed_s >= _timeout_s )); then
+      break
+    fi
+    sleep "$GH_GOVERNANCE_TRACK_DELETE_INTERVAL_S"
+    (( _elapsed_s += GH_GOVERNANCE_TRACK_DELETE_INTERVAL_S )) || true
+  done
+  echo "Repo '$_repo_path' po ${GH_GOVERNANCE_TRACK_DELETE_TIMEOUT_MIN} min stále existuje – úklid neproveden." >&2
+  return 2
 }

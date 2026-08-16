@@ -1,10 +1,13 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
-# Workflow archive-repository: issue s labelem archive-repo → archivace
-# spravovaného repa. Bezpečnostní schéma shodné s new-repository.yml
-# (parse job čte event soubor, execute dostává zvalidované hodnoty přes env).
-# Execute pushuje přepnutí řádku completion manifestu (checkout s tokenem
-# + identita bota); ukazatel /state/ se dál neposouvá.
-name: archive-repository
+# Workflow track-delete: issue s labelem track-delete → sledování zániku repa
+# po žádosti o smazání (defs/defs-governance-repo.md). Bezpečnostní schéma
+# shodné s new-repository.yml (parse job čte event soubor, execute dostává
+# zvalidované hodnoty přes env). Workflow nic na GitHubu nemaže – polluje
+# existenci repa a po prokázaném 404 uklidí ukazatel /state/ a řádek
+# completion manifestu (push přes checkout s tokenem + identita bota).
+# Concurrency group repo-<repo_name> serializuje úklid se souběžnou
+# new/archive/unarchive operací nad týmž repem.
+name: track-delete
 
 on:
   issues:
@@ -15,7 +18,7 @@ permissions:
 
 jobs:
   parse:
-    if: contains(github.event.issue.labels.*.name, 'archive-repo')
+    if: contains(github.event.issue.labels.*.name, 'track-delete')
     runs-on: ubuntu-latest
     environment: bot
     outputs:
@@ -28,7 +31,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Parse a autorizace issue
+      - name: Parse issue
         id: parse
         env:
           GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
@@ -37,13 +40,14 @@ jobs:
           GITHUB_ORG_HOSTNAME: ${{ vars.GOV_HOSTNAME }}
           GH_REPO_PREFIX: ${{ vars.GOV_REPO_PREFIX }}
           GH_GOVERNANCE_REPO: ${{ github.event.repository.name }}
-        run: bash bin/gov-archive-repository.sh --parse
+        run: bash bin/gov-track-delete.sh --parse
 
   execute:
     needs: parse
     if: needs.parse.outputs.result == 'ok'
     runs-on: ubuntu-latest
     environment: bot
+    timeout-minutes: 15
     concurrency:
       group: repo-${{ needs.parse.outputs.repo_name }}
     steps:
@@ -55,7 +59,7 @@ jobs:
         run: |
           git config user.name "governance-bot"
           git config user.email "governance-bot@users.noreply.github.com"
-      - name: Archivace repa
+      - name: Sledování zániku repa a úklid
         env:
           GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
           GH_HOST: ${{ vars.GOV_HOSTNAME }}
@@ -66,4 +70,4 @@ jobs:
           PROJECT_KEY: ${{ needs.parse.outputs.project_key }}
           GH_NAME: ${{ needs.parse.outputs.gh_name }}
           ISSUE_NUMBER: ${{ needs.parse.outputs.issue_number }}
-        run: bash bin/gov-archive-repository.sh --execute "$PROJECT_KEY" "$GH_NAME" "$ISSUE_NUMBER"
+        run: bash bin/gov-track-delete.sh --execute "$PROJECT_KEY" "$GH_NAME" "$ISSUE_NUMBER"
