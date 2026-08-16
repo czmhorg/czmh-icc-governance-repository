@@ -1,0 +1,72 @@
+# GENEROVANO gov-sync.sh -- needitovat v gov repu
+# Workflow new-repository: issue s labelem create-repo → založení spravovaného
+# repa dle INI konfigurace conf.d (návrh docs/navrh/governance/governance-repo.md).
+# Bezpečnost: tělo issue se NIKDY neinterpoluje do run: bloku – parse job ho čte
+# z $GITHUB_EVENT_PATH; execute job dostává už jen hodnoty zvalidované přísnými
+# regexy, a i ty se předávají přes env, ne interpolací do skriptu.
+# Dvoujobové schéma parse→execute: workflow-level concurrency tělo issue nevidí,
+# proto je concurrency až na execute jobu (viz docs/github/actions-concurrency.md).
+name: new-repository
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  parse:
+    if: contains(github.event.issue.labels.*.name, 'create-repo')
+    runs-on: ubuntu-latest
+    environment: bot
+    outputs:
+      result: ${{ steps.parse.outputs.result }}
+      issue_number: ${{ steps.parse.outputs.issue_number }}
+      project_key: ${{ steps.parse.outputs.project_key }}
+      gh_name: ${{ steps.parse.outputs.gh_name }}
+      repo_name: ${{ steps.parse.outputs.repo_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Parse a autorizace issue
+        id: parse
+        env:
+          GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+          GH_HOST: ${{ vars.GOV_HOSTNAME }}
+          GITHUB_ORG: ${{ vars.GOV_ORG }}
+          GITHUB_ORG_HOSTNAME: ${{ vars.GOV_HOSTNAME }}
+          GH_REPO_PREFIX: ${{ vars.GOV_REPO_PREFIX }}
+          GH_GOVERNANCE_REPO: ${{ github.event.repository.name }}
+        run: bash bin/gov-new-repository.sh --parse
+
+  execute:
+    needs: parse
+    if: needs.parse.outputs.result == 'ok'
+    runs-on: ubuntu-latest
+    environment: bot
+    concurrency:
+      group: repo-${{ needs.parse.outputs.repo_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GOV_BOT_TOKEN }}
+      - name: Identita bota pro commity /state/
+        run: |
+          git config user.name "governance-bot"
+          git config user.email "governance-bot@users.noreply.github.com"
+      - name: Založení repa
+        env:
+          GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+          GH_HOST: ${{ vars.GOV_HOSTNAME }}
+          GITHUB_ORG: ${{ vars.GOV_ORG }}
+          GITHUB_ORG_HOSTNAME: ${{ vars.GOV_HOSTNAME }}
+          GH_REPO_PREFIX: ${{ vars.GOV_REPO_PREFIX }}
+          GH_GOVERNANCE_REPO: ${{ github.event.repository.name }}
+          GH_NEW_REPO_VISIBILITY: ${{ vars.GOV_NEW_REPO_VISIBILITY }}
+          PROJECT_KEY: ${{ needs.parse.outputs.project_key }}
+          GH_NAME: ${{ needs.parse.outputs.gh_name }}
+          ISSUE_NUMBER: ${{ needs.parse.outputs.issue_number }}
+        run: bash bin/gov-new-repository.sh --execute "$PROJECT_KEY" "$GH_NAME" "$ISSUE_NUMBER"

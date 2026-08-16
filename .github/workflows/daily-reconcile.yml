@@ -1,0 +1,49 @@
+# GENEROVANO gov-sync.sh -- needitovat v gov repu
+# Workflow daily-reconcile: denní kontrola konzistence rep organizace
+# (defs/defs.md – Report kontroly konzistence). Jediný denní cron; pondělní
+# (weekly) vyhodnocení pozná skript podle data, ne cron. Režim lze vynutit
+# ručním spuštěním (workflow_dispatch, vstup mode).
+name: daily-reconcile
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Režim vyhodnocení
+        type: choice
+        options: [auto, daily, weekly]
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-reconcile
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    environment: bot
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GOV_BOT_TOKEN }}
+      - name: Identita bota pro commity /state/
+        run: |
+          git config user.name "governance-bot"
+          git config user.email "governance-bot@users.noreply.github.com"
+      - name: Kontrola konzistence
+        env:
+          GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+          GH_HOST: ${{ vars.GOV_HOSTNAME }}
+          GITHUB_ORG: ${{ vars.GOV_ORG }}
+          GITHUB_ORG_HOSTNAME: ${{ vars.GOV_HOSTNAME }}
+          GH_REPO_PREFIX: ${{ vars.GOV_REPO_PREFIX }}
+          # GH_GOVERNANCE_REPO se u schedule eventu neodvozuje z github.event
+          # (payload repo nemusí obsahovat) – default <prefix>-governance-repository
+          # z gh-common-defs.sh odpovídá názvu gov repa.
+          MODE: ${{ inputs.mode || 'auto' }}
+        run: bash bin/gov-daily-reconcile.sh --mode "$MODE"
