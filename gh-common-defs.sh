@@ -30,10 +30,20 @@ _GH_COMMON_DEFS_LOADED=1
 # Odvozený identifikátor <ghGlobalPrefix>-governance-repository (defs/defs.md).
 : "${GH_GOVERNANCE_REPO:=${GH_REPO_PREFIX}-governance-repository}"
 
+# Tým lidských adminů gov repa (governance-repo.md, souhrnná tabulka práv).
+# Testovací default; produkce: czmh-bbpk-governance-admins.
+# gov-init.sh tým nezakládá – jen ověřuje jeho existenci.
+: "${GH_GOVERNANCE_ADMIN_TEAM:=test-gov-admins}"
+
 # Viditelnost rep zakládaných governancí (workflow new-repository / gh-new).
 # Nikdy natvrdo v kódu. Testovací prostředí (GitHub Free org): public;
 # produkce (GitHub Enterprise) bude používat internal.
 : "${GH_NEW_REPO_VISIBILITY:=public}"
+
+# Viditelnost gov repa (gov-init.sh). Default sleduje GH_NEW_REPO_VISIBILITY.
+# POZOR: default se vyhodnotí před načtením gh-common-defs.local.sh – přepsání
+# GH_NEW_REPO_VISIBILITY až tam se sem nepropíše; v .local.sh nastav obě.
+: "${GH_GOVERNANCE_REPO_VISIBILITY:=${GH_NEW_REPO_VISIBILITY}}"
 
 # Formát ghName (defs/defs.md); ghRepoName = <prefix>-<projectKey>-<ghName>,
 # max 100 znaků. Sdílí klientské funkce (gh-new, …) i governance moduly.
