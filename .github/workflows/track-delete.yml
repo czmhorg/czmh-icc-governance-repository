@@ -35,11 +35,7 @@ jobs:
         id: parse
         env:
           GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
-          GH_HOST: ${{ vars.GOV_HOSTNAME }}
-          GITHUB_ORG: ${{ vars.GOV_ORG }}
-          GITHUB_ORG_HOSTNAME: ${{ vars.GOV_HOSTNAME }}
-          GH_REPO_PREFIX: ${{ vars.GOV_REPO_PREFIX }}
-          GH_GOVERNANCE_REPO: ${{ github.event.repository.name }}
+          GH_ENTERPRISE_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
         run: bash bin/gov-track-delete.sh --parse
 
   execute:
@@ -62,11 +58,7 @@ jobs:
       - name: Sledování zániku repa a úklid
         env:
           GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
-          GH_HOST: ${{ vars.GOV_HOSTNAME }}
-          GITHUB_ORG: ${{ vars.GOV_ORG }}
-          GITHUB_ORG_HOSTNAME: ${{ vars.GOV_HOSTNAME }}
-          GH_REPO_PREFIX: ${{ vars.GOV_REPO_PREFIX }}
-          GH_GOVERNANCE_REPO: ${{ github.event.repository.name }}
+          GH_ENTERPRISE_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
           PROJECT_KEY: ${{ needs.parse.outputs.project_key }}
           GH_NAME: ${{ needs.parse.outputs.gh_name }}
           ISSUE_NUMBER: ${{ needs.parse.outputs.issue_number }}

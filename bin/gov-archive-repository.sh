@@ -21,7 +21,7 @@ if [[ "${1:-}" == "--help" ]]; then
   echo "               výstupy do GITHUB_OUTPUT. Odmítnutí zavře issue."
   echo "  --execute    Execute job workflow: provede operaci a zavře issue."
   echo ""
-  echo "Příklad: GH_CONFD_ROOT=~/gov-checkout/conf.d bash governance/bin/gov-archive-repository.sh bbpkid stara-app"
+  echo "Příklad: bash governance/bin/gov-archive-repository.sh bbpkid stara-app"
   echo ""
   echo "Práva:   admin na repu projektu (archivace)."
   exit 0

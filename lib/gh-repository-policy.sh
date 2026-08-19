@@ -7,22 +7,23 @@ _GH_REPOSITORY_POLICY_LOADED=1
 
 _gh-jenkins-policy-resolve() {
   local _key="$1" _login_name="$2" _configured_name="$3" _decision_name="$4"
-  local _mhn
+  local _domain
   declare -n _login_ref="$_login_name" _configured_ref="$_configured_name"
   declare -n _decision_ref="$_decision_name"
 
   _login_ref=""
   _configured_ref=false
   _decision_ref=disallowed
-  _mhn=$(_mhn_for_key "$_key") || {
-    echo "Chyba: projectKey '$_key' neni nakonfigurovan v zadnem MHN." >&2
+  _domain="${_GH_CONF[projects/$_key/domain]:-}"
+  if [[ -z "$_domain" ]]; then
+    echo "Chyba: projectKey '$_key' neni nakonfigurovan v zadne domene." >&2
     return 1
-  }
-  # configured/login ⇔ business service má klíč jenkins_user; decision ⇔
+  fi
+  # configured/login ⇔ doména má klíč jenkins_user; decision ⇔
   # atribut jenkins u některé položky klíče rulesets projektu. Formát loginu
   # a konzistenci validuje parser lib/gh-conf.sh při načtení konfigurace.
-  if [[ -v _GH_CONF["business-services/$_mhn/jenkins_user"] ]]; then
-    _login_ref="${_GH_CONF[business-services/$_mhn/jenkins_user]}"
+  if [[ -v _GH_CONF["domains/$_domain/jenkins_user"] ]]; then
+    _login_ref="${_GH_CONF[domains/$_domain/jenkins_user]}"
     _configured_ref=true
     _gh-project-uses-jenkins "$_key" && _decision_ref=allowed
   fi
@@ -112,8 +113,9 @@ _gh-jenkins-policy-preflight() {
 
 # ── Repository rulesets ───────────────────────────────────────────────────────
 # Profil = definice jednoho rulesetu (pole ochrany + klíč branches), projekt si
-# rulesety vybírá klíčem rulesets; na repu vznikají rulesety mh-policy-<profil>.
-# Návrh a rozhodnutí: docs/navrh/governance/prechod-rulesets.md.
+# rulesety vybírá klíčem rulesets; na repu vznikají rulesety
+# ${GH_RULESET_PREFIX}-<profil> (gh-common-defs.sh).
+# Návrh a rozhodnutí: docs/implementovano/prechod-rulesets.md.
 
 _gh-conf-rulesets-items() {
   # Vypíše položky klíče rulesets projektu po řádcích: "<profil>\t<jenkins:0|1>".
@@ -148,12 +150,14 @@ _gh-project-uses-jenkins() {
 declare -gA _GH_JENKINS_USER_ID_CACHE=()
 
 _gh-jenkins-user-id() {
-  # Vrátí číselné ID GitHub účtu (bypass actor rulesetu vyžaduje actor_id,
-  # ne login); výsledek cachuje v paměti shellu.
-  # Použití: _gh-jenkins-user-id <login>
+  # Naplní nameref číselným ID GitHub účtu (bypass actor rulesetu vyžaduje
+  # actor_id, ne login); výsledek cachuje v paměti shellu. Nameref místo
+  # stdout, aby zápis do cache nezanikal v subshellu command substitution.
+  # Použití: _gh-jenkins-user-id <login> <výstupní proměnná>
   local _login="$1" _id
+  declare -n _gh_jenkins_id_ref="$2"
   if [[ -v _GH_JENKINS_USER_ID_CACHE["$_login"] ]]; then
-    printf '%s\n' "${_GH_JENKINS_USER_ID_CACHE[$_login]}"
+    _gh_jenkins_id_ref="${_GH_JENKINS_USER_ID_CACHE[$_login]}"
     return 0
   fi
   _id=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "users/$_login" --jq '.id') || {
@@ -165,11 +169,11 @@ _gh-jenkins-user-id() {
     return 1
   fi
   _GH_JENKINS_USER_ID_CACHE["$_login"]="$_id"
-  printf '%s\n' "$_id"
+  _gh_jenkins_id_ref="$_id"
 }
 
 _gh-ruleset-payload() {
-  # Sestaví JSON payload rulesetu mh-policy-<profil> z polí profilu – offline,
+  # Sestaví JSON payload rulesetu ${GH_RULESET_PREFIX}-<profil> z polí profilu – offline,
   # bez sítě (actor_id dodá volající). Překlad branch protection → ruleset dle
   # docs/github/branch-protection-vs-rulesets-mapovani.md a rozhodnutí návrhu:
   #   - allow_force_pushes/allow_deletions=false → pravidlo non_fast_forward/deletion,
@@ -205,7 +209,7 @@ _gh-ruleset-payload() {
   _value="${_GH_CONF[profiles/$_profile/required_status_checks]}"
   _value="${_value//[[:space:]]/}"
   if [[ "$_value" != null && "$_value" != *'"contexts":[]'* ]]; then
-    echo "Chyba: Profil '$_profile' má neprázdný seznam checků v required_status_checks – překlad na ruleset zatím není podporován (viz docs/navrh/governance/prechod-rulesets.md)." >&2
+    echo "Chyba: Profil '$_profile' má neprázdný seznam checků v required_status_checks – překlad na ruleset zatím není podporován (viz docs/implementovano/prechod-rulesets.md)." >&2
     return 1
   fi
   _value="${_GH_CONF[profiles/$_profile/restrictions]}"
@@ -226,7 +230,7 @@ _gh-ruleset-payload() {
   done
 
   printf '{
-  "name": "mh-policy-%s",
+  "name": "%s-%s",
   "target": "branch",
   "enforcement": "active",
   "conditions": { "ref_name": { "include": ["%s"], "exclude": [] } },
@@ -234,7 +238,7 @@ _gh-ruleset-payload() {
   "rules": [
     %s
   ]
-}' "$_profile" "${_GH_CONF[profiles/$_profile/branches]}" "$_bypass_actors" "$_rules"
+}' "$GH_RULESET_PREFIX" "$_profile" "${_GH_CONF[profiles/$_profile/branches]}" "$_bypass_actors" "$_rules"
 }
 
 _gh-ruleset-payloads-build() {
@@ -249,13 +253,13 @@ _gh-ruleset-payloads-build() {
     _actor_id=""
     if [[ "$_jenkins" == 1 ]]; then
       if [[ -z "$_jenkins_login" ]]; then
-        echo "Chyba: Položka '$_profile|jenkins' v klíči rulesets projektu '$_key', ale Jenkins login není k dispozici. Zkontroluj klíč jenkins_user business service v conf.d/business-services/." >&2
+        echo "Chyba: Položka '$_profile|jenkins' v klíči rulesets projektu '$_key', ale Jenkins login není k dispozici. Zkontroluj klíč jenkins_user domény v conf.d/domains/." >&2
         return 1
       fi
-      _actor_id=$(_gh-jenkins-user-id "$_jenkins_login") || return 1
+      _gh-jenkins-user-id "$_jenkins_login" _actor_id || return 1
     fi
     _payload=$(_gh-ruleset-payload "$_key" "$_profile" "$_jenkins" "$_actor_id") || return 1
-    _payloads_ref["mh-policy-$_profile"]="$_payload"
+    _payloads_ref["${GH_RULESET_PREFIX}-$_profile"]="$_payload"
   done <<< "$_items"
 }
 
@@ -268,7 +272,7 @@ _gh-ruleset-list() {
 
 _gh-ruleset-apply() {
   # Aplikuje rulesety podle klíče rulesets projektu: find-by-name → POST
-  # (neexistuje) / PUT (existuje); osiřelé rulesety mh-policy-* smaže.
+  # (neexistuje) / PUT (existuje); osiřelé rulesety ${GH_RULESET_PREFIX}-* smaže.
   # Ruleset se posílá vždy jako kompletní payload (PUT přepisuje i bypass).
   # Použití: _gh-ruleset-apply <repo_path> <projectKey> [jenkins_login]
   local _repo_path="$1" _key="$2" _jenkins_login="${3:-}"
@@ -290,14 +294,14 @@ _gh-ruleset-apply() {
     fi
   done
   for _name in "${!_existing_ids[@]}"; do
-    [[ "$_name" == mh-policy-* ]] || continue
+    [[ "$_name" == "${GH_RULESET_PREFIX}-"* ]] || continue
     [[ -v _expected_payloads["$_name"] ]] && continue
     _gh-jenkins-delete "repos/$_repo_path/rulesets/${_existing_ids[$_name]}" "$_key" || return 1
   done
 }
 
 _gh-ruleset-check() {
-  # Sémanticky porovná rulesety mh-policy-* repa s očekávaným stavem z conf.d
+  # Sémanticky porovná rulesety ${GH_RULESET_PREFIX}-* repa s očekávaným stavem z conf.d
   # (normalizovaný JSON přes jq) a smoke-testem ověří efektivní pravidla
   # výchozí větve. Výstup: OK / DIFF (rc 0); rc 2 při chybě.
   # Použití: _gh-ruleset-check <repo_path> <branch> <projectKey> [jenkins_login]
@@ -313,7 +317,7 @@ _gh-ruleset-check() {
     [[ -v _existing_ids["$_name"] ]] || { printf 'DIFF\n'; return 0; }
   done
   for _name in "${!_existing_ids[@]}"; do
-    if [[ "$_name" == mh-policy-* && ! -v _expected_payloads["$_name"] ]]; then
+    if [[ "$_name" == "${GH_RULESET_PREFIX}-"* && ! -v _expected_payloads["$_name"] ]]; then
       printf 'DIFF\n'
       return 0
     fi
@@ -544,6 +548,11 @@ _gh-validate-admin-team() {
     fi
     _team="${_entry%%|*}"
     _permission="${_entry##*|}"
+    if [[ "$_team" == "$GH_SECURITY_MANAGERS_TEAM" ]]; then
+      echo "Chyba: Tým '$GH_SECURITY_MANAGERS_TEAM' do klíče repository_teams projektu '$_key' nepatří (conf.d/projects/$_key.conf)." >&2
+      echo "       Je implicitní součástí politiky každého repa (defs/defs.md: ghOrgSecurityManagersTeam) a nekonfiguruje se." >&2
+      return 1
+    fi
     [[ -n "$_team" && "$_permission" == admin ]] && _has_admin=true
   done
 

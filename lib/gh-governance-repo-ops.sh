@@ -1,9 +1,9 @@
 #!/bin/bash
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
-# Jádro governance operací new/archive/unarchive nad spravovanými repy
-# (návrh docs/navrh/governance/governance-repo.md). Volají je entry skripty
-# governance/bin/gov-*.sh – lokálně (krok 2 PoC) i z workflows gov repa.
+# Jádro governance operací new/archive/unarchive nad spravovanými repy.
+# Volají je entry skripty governance/bin/gov-*.sh – lokálně (krok 2 PoC)
+# i z workflows gov repa.
 # Závislosti: gh-common-defs.sh, lib/gh-conf.sh, lib/gh-repository-policy.sh,
 # lib/gh-governance-state.sh, lib/gh-governance-manifest.sh.
 [[ -n "${_GH_GOVERNANCE_REPO_OPS_LOADED:-}" ]] && \

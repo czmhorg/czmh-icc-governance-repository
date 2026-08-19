@@ -25,7 +25,7 @@ if [[ "${1:-}" == "--help" ]]; then
   echo "  --execute    Execute job workflow: poll existence repa; úklid + zavření"
   echo "               issue, nebo komentář (repo stále existuje, dořeší reconcile)."
   echo ""
-  echo "Příklad: GH_CONFD_ROOT=~/gov-checkout/conf.d bash governance/bin/gov-track-delete.sh bbpkid stara-app"
+  echo "Příklad: bash governance/bin/gov-track-delete.sh bbpkid stara-app"
   echo ""
   echo "Práva:   push do gov repa (state/), read na repech organizace."
   exit 0

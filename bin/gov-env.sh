@@ -20,6 +20,29 @@ if [[ -z "$_GOV_ROOT" ]]; then
   exit 1
 fi
 
+# V GitHub Actions se identita prostředí odvozuje z env proměnných runneru
+# (vždy nastavené, u každého eventu včetně schedule): gov repo žije v organizaci,
+# kterou spravuje, a jmenuje se <GH_REPO_PREFIX>-governance-repository
+# (odvozený identifikátor, defs/defs.md). Hodnoty se nastaví před načtením
+# gh-common-defs.sh, takže defaulty (":=") se neuplatní; lokální běhy
+# (GITHUB_ACTIONS nenastaveno) se řídí konfigurací jako dosud.
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  GITHUB_ORG="$GITHUB_REPOSITORY_OWNER"
+  GITHUB_ORG_HOSTNAME="${GITHUB_SERVER_URL#*://}"
+  GH_GOVERNANCE_REPO="${GITHUB_REPOSITORY#*/}"
+  GH_REPO_PREFIX="${GH_GOVERNANCE_REPO%-governance-repository}"
+  if [[ "$GH_REPO_PREFIX" == "$GH_GOVERNANCE_REPO" ]]; then
+    echo "Chyba: Název gov repa '$GH_GOVERNANCE_REPO' nekončí na '-governance-repository' – GH_REPO_PREFIX nelze odvodit." >&2
+    exit 1
+  fi
+  # gh čte pro jiný host než github.com token z GH_ENTERPRISE_TOKEN, GH_TOKEN
+  # ignoruje (docs/github/gh-cli-token-podle-hostu.md) – workflows předávají
+  # PAT bota v GH_TOKEN, na GHES ho proto zrcadlíme.
+  if [[ "$GITHUB_ORG_HOSTNAME" != "github.com" && -n "${GH_TOKEN:-}" ]]; then
+    export GH_ENTERPRISE_TOKEN="${GH_ENTERPRISE_TOKEN:-$GH_TOKEN}"
+  fi
+fi
+
 source "$_GOV_ROOT/gh-common-defs.sh"
 source "$_GOV_ROOT/lib/gh-repository-policy.sh"
 source "$_GOV_ROOT/lib/gh-governance-state.sh"
@@ -28,6 +51,16 @@ source "$_GOV_ROOT/lib/gh-governance-repo-ops.sh"
 source "$_GOV_ROOT/lib/gh-governance-issue.sh"
 source "$_GOV_ROOT/lib/gh-governance-report.sh"
 source "$_GOV_ROOT/lib/gh-governance-reconcile.sh"
+
+# Lokální běh (mimo Actions, bez GH_CONFD_ROOT — dle _GH_CONFD_SYNC):
+# synchronizuj pracovní klon gov repa a drž jeho zámek po celý běh entry
+# skriptu — operace commitují a pushují state/ do pracovního klonu
+# (docs/navrh/pracovni-repa-funkci.md). V Actions i s GH_CONFD_ROOT se čte
+# lokální conf.d bez synchronizace.
+if [[ "${_GH_CONFD_SYNC:-0}" == "1" ]]; then
+  _gh-confd-sync --hold-lock || exit 1
+  trap '_gh-work-repo-unlock "${_GH_COMMON_CONF_D%/*}"' EXIT
+fi
 
 if [[ -z "${_GH_CONF_DATA_LOADED:-}" ]]; then
   echo "Chyba: Konfigurace conf.d není načtena – governance operaci nelze spustit." >&2

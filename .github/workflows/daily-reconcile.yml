@@ -36,14 +36,10 @@ jobs:
           git config user.name "governance-bot"
           git config user.email "governance-bot@users.noreply.github.com"
       - name: Kontrola konzistence
+        # Org, hostname, prefix i název gov repa odvozuje bin/gov-env.sh
+        # z env proměnných runneru (GITHUB_REPOSITORY…) – žádná konfigurace.
         env:
           GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
-          GH_HOST: ${{ vars.GOV_HOSTNAME }}
-          GITHUB_ORG: ${{ vars.GOV_ORG }}
-          GITHUB_ORG_HOSTNAME: ${{ vars.GOV_HOSTNAME }}
-          GH_REPO_PREFIX: ${{ vars.GOV_REPO_PREFIX }}
-          # GH_GOVERNANCE_REPO se u schedule eventu neodvozuje z github.event
-          # (payload repo nemusí obsahovat) – default <prefix>-governance-repository
-          # z gh-common-defs.sh odpovídá názvu gov repa.
+          GH_ENTERPRISE_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
           MODE: ${{ inputs.mode || 'auto' }}
         run: bash bin/gov-daily-reconcile.sh --mode "$MODE"

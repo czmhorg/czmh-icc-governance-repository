@@ -1,8 +1,8 @@
 #!/bin/bash
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
-# Ukazatel posledního aplikovaného stavu konfigurace (defs/defs.md, návrh
-# docs/navrh/governance/governance-repo.md): soubor state/<ghRepoName> v gov
+# Ukazatel posledního aplikovaného stavu konfigurace (defs/defs.md):
+# soubor state/<ghRepoName> v gov
 # repu, obsah = jeden řádek s plným SHA commitu gov repa, jehož konfigurace
 # byla na repo naposledy úspěšně aplikována. Modul pracuje nad lokálním
 # checkoutem gov repa (kořen = rodič adresáře conf.d, viz _GH_COMMON_CONF_D).
@@ -183,6 +183,9 @@ _gh-governance-teams-to-remove() {
   _new_csv=",$(IFS=,; echo "${_new_teams[*]-}"),"
   _current=",${_GH_CONF[projects/$_key/repository_teams]:-},"
   for _team in "${_old_teams[@]}"; do
+    # ghOrgSecurityManagersTeam se nikdy neodebírá (implicitní součást politiky;
+    # v historické konfiguraci se mohl vyskytnout před zákazem v repository_teams).
+    [[ "$_team" == "$GH_SECURITY_MANAGERS_TEAM" ]] && continue
     [[ "$_new_csv" == *",$_team,"* ]] && continue
     [[ "$_current" == *",$_team|"* ]] && continue
     _rm_ref+=("$_team")

@@ -17,7 +17,7 @@ _gov_show_help() {
   echo "                   daily nebo weekly (weekly navíc zavírá čisté issue)."
   echo "  --report SOUBOR  Kam zapsat TSV itemy reportu (výchozí: mktemp)."
   echo ""
-  echo "Příklad: GH_CONFD_ROOT=~/gov-checkout/conf.d bash governance/bin/gov-daily-reconcile.sh --mode daily"
+  echo "Příklad: bash governance/bin/gov-daily-reconcile.sh --mode daily"
   echo ""
   echo "Práva:   admin v organizaci (čtení rep, týmy, rulesety), push do gov repa (/state/),"
   echo "         issues RW na gov repu (reconcile issue)."

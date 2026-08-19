@@ -78,7 +78,7 @@ _gh-governance-issue-parse() {
     return 1
   fi
   # Existence projektu proti načtenému _GH_CONF – checkout gov repa je autorita.
-  if [[ -z "${_GH_CONF[projects/${_parsed_ref[body_project_key]}/business_service]:-}" ]]; then
+  if [[ -z "${_GH_CONF[projects/${_parsed_ref[body_project_key]}/domain]:-}" ]]; then
     _parsed_ref[reject]=unknown_project
     return 1
   fi

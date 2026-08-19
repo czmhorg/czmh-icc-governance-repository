@@ -1,9 +1,9 @@
 #!/bin/bash
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
-# Report kontroly konzistence (reconcile) dle závazného postupu v defs/defs.md
-# a životní cyklus reconcile issue dle docs/navrh/governance/governance-repo.md
-# (ř. 160–165). Itemy se sbírají jako TSV řádky `level\ttyp\trepo\tdetail`
+# Report kontroly konzistence (reconcile) a životní cyklus reconcile issue
+# dle závazného postupu v defs/defs.md.
+# Itemy se sbírají jako TSV řádky `level\ttyp\trepo\tdetail`
 # do souboru; render do souhrnu běhu ($GITHUB_STEP_SUMMARY) a těla issue
 # (jen warning+error + odkaz na běh) dělají render funkce.
 # Závislosti: gh-common-defs.sh (_require_vars).

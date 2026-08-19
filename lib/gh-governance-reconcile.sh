@@ -2,8 +2,8 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
 # Klasifikace rep organizace a per-repo reconciliace pro workflow
-# daily-reconcile (defs/defs.md – Report kontroly konzistence, návrh
-# docs/navrh/governance/governance-repo.md). Průchod výpisem rep organizace
+# daily-reconcile (defs/defs.md – Report kontroly konzistence).
+# Průchod výpisem rep organizace
 # (GET /orgs/{org}/repos, ne Search – axiom kapacity pro celou org neplatí
 # a search je eventually consistent).
 # Závislosti: gh-common-defs.sh, lib/gh-conf.sh, lib/gh-repository-policy.sh,
@@ -38,7 +38,7 @@ _gh-governance-classify() {
   fi
   if [[ $_ghp_count -eq 1 ]]; then
     _p="${_ghp#"$GH_PROJECT_TOPIC_PREFIX"}"
-    if [[ -z "${_GH_CONF[projects/$_p/business_service]:-}" ]]; then
+    if [[ -z "${_GH_CONF[projects/$_p/domain]:-}" ]]; then
       printf 'osirele\t%s\n' "$_p"
     elif [[ "$_name" == "${GH_REPO_PREFIX}-${_p}-"* ]]; then
       printf 'spravovane\t%s\n' "$_p"
@@ -51,7 +51,7 @@ _gh-governance-classify() {
   if [[ "$_name" == "${GH_REPO_PREFIX}-"* ]]; then
     _rest="${_name#"${GH_REPO_PREFIX}-"}"
     _p="${_rest%%-*}"
-    if [[ "$_rest" == *-* && -n "${_GH_CONF[projects/$_p/business_service]:-}" ]]; then
+    if [[ "$_rest" == *-* && -n "${_GH_CONF[projects/$_p/domain]:-}" ]]; then
       printf 'divoke\t%s\n' "$_p"
       return 0
     fi
@@ -114,6 +114,8 @@ _gh-governance-reconcile-repo() {
   while IFS=$'\t' read -r _team _permission; do
     [[ -n "$_team" ]] && _expected_map["$_team"]=1
   done <<< "$_expected"
+  # ghOrgSecurityManagersTeam je implicitní součást politiky — není tým navíc.
+  _expected_map["$GH_SECURITY_MANAGERS_TEAM"]=1
   _observed=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "repos/$_repo_path/teams" \
     --paginate --jq '.[] | .slug') || return 1
   while IFS= read -r _team; do
@@ -121,10 +123,10 @@ _gh-governance-reconcile-repo() {
       _gh-governance-report-add warning "tym prirazeny navic" "$_repo_path" "tým '$_team'"
   done <<< "$_observed"
 
-  # Warning: ruleset přiřazený navíc (bez prefixu mh-policy-; neodebírá se).
+  # Warning: ruleset přiřazený navíc (bez prefixu ${GH_RULESET_PREFIX}-; neodebírá se).
   _listing=$(_gh-ruleset-list "$_repo_path") || return 1
   while IFS=$'\t' read -r _id _rsname; do
-    [[ -n "$_id" && "$_rsname" != mh-policy-* ]] && \
+    [[ -n "$_id" && "$_rsname" != "${GH_RULESET_PREFIX}-"* ]] && \
       _gh-governance-report-add warning "ruleset prirazeny navic" "$_repo_path" "ruleset '$_rsname'"
   done <<< "$_listing"
 
