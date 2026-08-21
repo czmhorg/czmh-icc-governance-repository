@@ -111,6 +111,42 @@ _gh-jenkins-policy-preflight() {
   fi
 }
 
+_gh-governance-bot-collaborator-add() {
+  # Přidá governance bota (GH_GOVERNANCE_BOT_USER) jako přímého collaboratora
+  # s právem admin — implicitní součást policy: bot není org owner a bez
+  # explicitního přístupu by jeho PAT spravovaná repa neviděl.
+  # Použití: _gh-governance-bot-collaborator-add <repo_path> <projectKey>
+  local _repo_path="$1" _key="$2"
+  _gh-validate-admin-team "$_key" GITHUB_REPO_TEAMS || return 1
+  _require_vars GH_GOVERNANCE_BOT_USER || return 1
+  GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
+    "repos/$_repo_path/collaborators/$GH_GOVERNANCE_BOT_USER" \
+    --method PUT --field permission=admin >/dev/null
+}
+
+_gh-governance-bot-policy-preflight() {
+  # Preflight governance bota: login je povinny, ucet musi existovat, byt
+  # clenem organizace a lisit se od Jenkins uctu projektu (Jenkins pristup
+  # by admin pravo bota prepsal na push). Totoznost s autentizovanym uctem
+  # je naopak v poradku — reconcile bezi primo pod botem.
+  # Použití: _gh-governance-bot-policy-preflight <projectKey>
+  local _key="$1" _login _configured _decision
+  _require_vars GH_GOVERNANCE_BOT_USER || return 1
+  GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "users/$GH_GOVERNANCE_BOT_USER" >/dev/null || {
+    echo "Chyba: Governance bot '$GH_GOVERNANCE_BOT_USER' neexistuje nebo jej nelze overit." >&2
+    return 1
+  }
+  GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "orgs/$GITHUB_ORG/members/$GH_GOVERNANCE_BOT_USER" >/dev/null || {
+    echo "Chyba: Governance bot '$GH_GOVERNANCE_BOT_USER' neni clenem organizace '$GITHUB_ORG'." >&2
+    return 1
+  }
+  _gh-jenkins-policy-resolve "$_key" _login _configured _decision || return 1
+  if [[ -n "$_login" && "${_login,,}" == "${GH_GOVERNANCE_BOT_USER,,}" ]]; then
+    echo "Chyba: Governance bot '$GH_GOVERNANCE_BOT_USER' nesmi byt totozny s Jenkins uctem projektu '$_key'." >&2
+    return 1
+  fi
+}
+
 # ── Repository rulesets ───────────────────────────────────────────────────────
 # Profil = definice jednoho rulesetu (pole ochrany + klíč branches), projekt si
 # rulesety vybírá klíčem rulesets; na repu vznikají rulesety
@@ -147,17 +183,18 @@ _gh-project-uses-jenkins() {
   [[ "$_items" == *$'\t'1* ]]
 }
 
-declare -gA _GH_JENKINS_USER_ID_CACHE=()
+declare -gA _GH_USER_ID_CACHE=()
 
-_gh-jenkins-user-id() {
+_gh-user-id() {
   # Naplní nameref číselným ID GitHub účtu (bypass actor rulesetu vyžaduje
-  # actor_id, ne login); výsledek cachuje v paměti shellu. Nameref místo
-  # stdout, aby zápis do cache nezanikal v subshellu command substitution.
-  # Použití: _gh-jenkins-user-id <login> <výstupní proměnná>
+  # actor_id, ne login) – Jenkins účet projektu i governance bot; výsledek
+  # cachuje v paměti shellu. Nameref místo stdout, aby zápis do cache
+  # nezanikal v subshellu command substitution.
+  # Použití: _gh-user-id <login> <výstupní proměnná>
   local _login="$1" _id
-  declare -n _gh_jenkins_id_ref="$2"
-  if [[ -v _GH_JENKINS_USER_ID_CACHE["$_login"] ]]; then
-    _gh_jenkins_id_ref="${_GH_JENKINS_USER_ID_CACHE[$_login]}"
+  declare -n _gh_user_id_ref="$2"
+  if [[ -v _GH_USER_ID_CACHE["$_login"] ]]; then
+    _gh_user_id_ref="${_GH_USER_ID_CACHE[$_login]}"
     return 0
   fi
   _id=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "users/$_login" --jq '.id') || {
@@ -168,8 +205,8 @@ _gh-jenkins-user-id() {
     echo "Chyba: Neocekavane ID GitHub uctu '$_login': '$_id'." >&2
     return 1
   fi
-  _GH_JENKINS_USER_ID_CACHE["$_login"]="$_id"
-  _gh_jenkins_id_ref="$_id"
+  _GH_USER_ID_CACHE["$_login"]="$_id"
+  _gh_user_id_ref="$_id"
 }
 
 _gh-ruleset-payload() {
@@ -256,7 +293,7 @@ _gh-ruleset-payloads-build() {
         echo "Chyba: Položka '$_profile|jenkins' v klíči rulesets projektu '$_key', ale Jenkins login není k dispozici. Zkontroluj klíč jenkins_user domény v conf.d/domains/." >&2
         return 1
       fi
-      _gh-jenkins-user-id "$_jenkins_login" _actor_id || return 1
+      _gh-user-id "$_jenkins_login" _actor_id || return 1
     fi
     _payload=$(_gh-ruleset-payload "$_key" "$_profile" "$_jenkins" "$_actor_id") || return 1
     _payloads_ref["${GH_RULESET_PREFIX}-$_profile"]="$_payload"
@@ -270,20 +307,40 @@ _gh-ruleset-list() {
     --paginate --jq '.[] | select(.source_type == "Repository") | [.id, .name] | @tsv'
 }
 
+_gh-ruleset-ids() {
+  # Naplní nameref asociativní pole jméno rulesetu → id (repository-level
+  # rulesety repa) – společný find-by-name krok apply/check/gov-init.
+  # Použití: local -A _ids=(); _gh-ruleset-ids <repo_path> _ids
+  local _repo_path="$1" _listing _id _name
+  declare -n _gh_ruleset_ids_ref="$2"
+  _listing=$(_gh-ruleset-list "$_repo_path") || return 1
+  while IFS=$'\t' read -r _id _name; do
+    [[ -n "$_id" ]] && _gh_ruleset_ids_ref["$_name"]="$_id"
+  done <<< "$_listing"
+  return 0
+}
+
+_gh-ruleset-branch-rule-types() {
+  # Vypíše typy efektivních pravidel větve (agregát všech aktivních rulesetů
+  # cílících větev) jako čárkami oddělený seznam – smoke-test, že ruleset na
+  # větev skutečně působí (docs/github/rulesets-put-prepis-a-bypass-mode.md).
+  # Použití: _gh-ruleset-branch-rule-types <repo_path> <branch>
+  GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
+    "repos/$1/rules/branches/$(_url_encode_path "$2")" \
+    --jq '[.[].type] | unique | join(",")'
+}
+
 _gh-ruleset-apply() {
   # Aplikuje rulesety podle klíče rulesets projektu: find-by-name → POST
   # (neexistuje) / PUT (existuje); osiřelé rulesety ${GH_RULESET_PREFIX}-* smaže.
   # Ruleset se posílá vždy jako kompletní payload (PUT přepisuje i bypass).
   # Použití: _gh-ruleset-apply <repo_path> <projectKey> [jenkins_login]
   local _repo_path="$1" _key="$2" _jenkins_login="${3:-}"
-  local _listing _id _name
+  local _name
   local -A _expected_payloads=() _existing_ids=()
   _gh-validate-admin-team "$_key" GITHUB_REPO_TEAMS || return 1
   _gh-ruleset-payloads-build "$_key" "$_jenkins_login" _expected_payloads || return 1
-  _listing=$(_gh-ruleset-list "$_repo_path") || return 1
-  while IFS=$'\t' read -r _id _name; do
-    [[ -n "$_id" ]] && _existing_ids["$_name"]="$_id"
-  done <<< "$_listing"
+  _gh-ruleset-ids "$_repo_path" _existing_ids || return 1
   for _name in "${!_expected_payloads[@]}"; do
     if [[ -v _existing_ids["$_name"] ]]; then
       _gh-api-input-retry "repos/$_repo_path/rulesets/${_existing_ids[$_name]}" \
@@ -306,13 +363,10 @@ _gh-ruleset-check() {
   # výchozí větve. Výstup: OK / DIFF (rc 0); rc 2 při chybě.
   # Použití: _gh-ruleset-check <repo_path> <branch> <projectKey> [jenkins_login]
   local _repo_path="$1" _branch="$2" _key="$3" _jenkins_login="${4:-}"
-  local _listing _id _name _result _observed_types _types _t _filter
+  local _name _result _observed_types _types _t _filter
   local -A _expected_payloads=() _existing_ids=()
   _gh-ruleset-payloads-build "$_key" "$_jenkins_login" _expected_payloads || return 2
-  _listing=$(_gh-ruleset-list "$_repo_path") || return 2
-  while IFS=$'\t' read -r _id _name; do
-    [[ -n "$_id" ]] && _existing_ids["$_name"]="$_id"
-  done <<< "$_listing"
+  _gh-ruleset-ids "$_repo_path" _existing_ids || return 2
   for _name in "${!_expected_payloads[@]}"; do
     [[ -v _existing_ids["$_name"] ]] || { printf 'DIFF\n'; return 0; }
   done
@@ -351,9 +405,7 @@ _gh-ruleset-check() {
   # Smoke-test: pravidla rulesetů cílících výchozí větev musí být podmnožinou
   # efektivních pravidel větve (během překryvu s branch protection jich může
   # být víc; přesné porovnání dělá GET /rulesets/{id} výše).
-  _observed_types=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
-    "repos/$_repo_path/rules/branches/$(_url_encode_path "$_branch")" \
-    --jq '[.[].type] | unique | join(",")') || return 2
+  _observed_types=$(_gh-ruleset-branch-rule-types "$_repo_path" "$_branch") || return 2
   for _name in "${!_expected_payloads[@]}"; do
     [[ "${_expected_payloads[$_name]}" == *'"include": ["~DEFAULT_BRANCH"]'* ]] || continue
     _types=$(grep -o '"type": "[a-z_]*"' <<< "${_expected_payloads[$_name]}" | \
@@ -379,18 +431,56 @@ _gh-repository-policy-expected-teams() {
 }
 
 _gh-repository-policy-collaborator-check() {
-  local _repo_path="$1" _login="$2" _expected="$3" _permission
+  # Ověří přímého collaboratora repa: expected=allowed → login musí mít
+  # oprávnění <required> (push/admin), jinak nesmí být přímý collaborator
+  # vůbec. Vypíše OK/DIFF; rc 2 při chybě API; prázdný login = OK.
+  # Použití: _gh-repository-policy-collaborator-check <repo_path> <login> <expected> <required>
+  local _repo_path="$1" _login="$2" _expected="$3" _required="$4" _permission
   [[ -n "$_login" ]] || { printf 'OK\n'; return 0; }
-  _permission=$(JENKINS_LOGIN="$_login" GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
+  _permission=$(COLLAB_LOGIN="$_login" COLLAB_PERM="$_required" \
+    GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
     "repos/$_repo_path/collaborators?affiliation=direct" --paginate --jq \
-    '[.[] | select((.login | ascii_downcase) == (env.JENKINS_LOGIN | ascii_downcase)) |
-      if (.permissions.push // false) then "push" else (.role_name // "none") end][0] // "none"') || return 2
-  if [[ "$_expected" == allowed && "$_permission" == push ]] || \
+    '[.[] | select((.login | ascii_downcase) == (env.COLLAB_LOGIN | ascii_downcase)) |
+      if (.permissions[env.COLLAB_PERM] // false) then env.COLLAB_PERM else (.role_name // "none") end][0] // "none"') || return 2
+  if [[ "$_expected" == allowed && "$_permission" == "$_required" ]] || \
      [[ "$_expected" != allowed && "$_permission" == none ]]; then
     printf 'OK\n'
   else
     printf 'DIFF\n'
   fi
+}
+
+_gh-repository-policy-extra-collaborators() {
+  # Čistá funkce (offline testy): z listingu přímých collaboratorů
+  # ("<login>\t<role>" po řádcích) vypíše ty mimo politiku – všechny kromě
+  # governance bota a Jenkins loginu (porovnání case-insensitive; prázdný
+  # Jenkins login = doména bez Jenkinse, pak je navíc každý kromě bota).
+  # Použití: _gh-repository-policy-extra-collaborators <listingTSV> <bot_login> <jenkins_login>
+  local _listing="$1" _bot="${2,,}" _jenkins="${3,,}" _login _role
+  while IFS=$'\t' read -r _login _role; do
+    [[ -n "$_login" ]] || continue
+    [[ "${_login,,}" == "$_bot" ]] && continue
+    [[ -n "$_jenkins" && "${_login,,}" == "$_jenkins" ]] && continue
+    printf '%s\t%s\n' "$_login" "$_role"
+  done <<< "$_listing"
+  return 0
+}
+
+_gh-repository-policy-extra-collaborators-list() {
+  # Vypíše přímé collaboratory repa mimo politiku ("<login>\t<role>" po
+  # řádcích). Očekávaní jsou governance bot a Jenkins login aktuální domény
+  # projektu bez ohledu na decision (je-li configured a ne allowed, odebírá
+  # ho _gh-repository-policy-remove – nehlásit dvakrát). Org owner přidaný
+  # přes PUT je v affiliation=direct a hlásí se jako každý jiný (politika
+  # přímé lidi nezná, docs/github/repo-collaborators-api.md). rc 1 při chybě.
+  # Použití: _gh-repository-policy-extra-collaborators-list <repo_path> <projectKey>
+  local _repo_path="$1" _key="$2" _login _configured _decision _listing
+  _require_vars GH_GOVERNANCE_BOT_USER || return 1
+  _gh-jenkins-policy-resolve "$_key" _login _configured _decision || return 1
+  _listing=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
+    "repos/$_repo_path/collaborators?affiliation=direct" --paginate \
+    --jq '.[] | [.login, (.role_name // "-")] | @tsv') || return 1
+  _gh-repository-policy-extra-collaborators "$_listing" "$GH_GOVERNANCE_BOT_USER" "$_login"
 }
 
 _gh-repository-policy-teams-check() {
@@ -417,18 +507,110 @@ _gh-repository-policy-teams-check() {
   fi
 }
 
+# ── Custom properties MHN a Deployment_Target ────────────────────────────────
+# Součást repository policy (defs/defs.md: business service, Deployment_Target):
+# MHN je kopie business service odvozené z conf.d – policy ji konverguje,
+# ruční změna v GH je drift. Deployment_Target je v rukou admina repa – policy
+# ji jen doplní výchozí hodnotou GH_DEPLOYMENT_TARGET_DEFAULT, když chybí;
+# existující hodnotu nikdy nemění ani nehlásí. Chování API (práva PAT,
+# částečný PATCH, tvar GET): docs/github/custom-properties.md.
+
+_gh-repository-policy-properties-read() {
+  # Načte hodnoty custom properties MHN a Deployment_Target repa do nameref
+  # proměnných (prázdná = nenastaveno; jq pokrývá chybějící položku i
+  # value null). Jeden GET; rc 1 při chybě API.
+  # Použití: _gh-repository-policy-properties-read <repo_path> <mhn_var> <dt_var>
+  # Interní proměnné mají vlastní prefix, aby nameref nestínil lokál stejného
+  # jména u volajícího (typicky _mhn/_dt).
+  local _repo_path="$1" _props_row _props_read_mhn _props_read_dt _props_extra
+  declare -n _props_mhn_ref="$2" _props_dt_ref="$3"
+  _props_mhn_ref=""; _props_dt_ref=""
+  _props_row=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "repos/$_repo_path/properties/values" \
+    --jq '(map({key: .property_name, value: ((.value // "") | tostring)}) | from_entries) as $p
+      | [($p.MHN // ""), ($p.Deployment_Target // "")] | @tsv') || {
+    echo "Chyba: Čtení custom properties repa '$_repo_path' selhalo." >&2
+    return 1
+  }
+  IFS=$'\t' read -r _props_read_mhn _props_read_dt _props_extra <<< "$_props_row"
+  _props_mhn_ref="$_props_read_mhn"; _props_dt_ref="$_props_read_dt"
+  return 0
+}
+
+_gh-repository-policy-properties-expected-mhn() {
+  # Vypíše očekávanou hodnotu property MHN projektu (business service = první
+  # složka klíče domain v conf.d); rc 1 s hláškou, když projekt nemá doménu.
+  # Použití: _gh-repository-policy-properties-expected-mhn <projectKey>
+  _mhn_for_key "$1" && return 0
+  echo "Chyba: Pro projectKey '$1' nelze urcit povinnou MHN property." >&2
+  return 1
+}
+
+_gh-repository-policy-properties-diff() {
+  # Čistá funkce (offline testy): vypíše detail prvního rozdílu property proti
+  # policy – „MHN property differs" / „Deployment_Target property missing" –
+  # nebo nic, když property sedí. Deployment_Target s libovolnou hodnotou sedí.
+  # Použití: _gh-repository-policy-properties-diff <mhn_expected> <mhn_observed> <dt_observed>
+  local _expected="$1" _mhn="$2" _dt="$3"
+  if [[ "$_mhn" != "$_expected" ]]; then
+    printf 'MHN property differs\n'
+  elif [[ -z "$_dt" ]]; then
+    printf 'Deployment_Target property missing\n'
+  fi
+  return 0
+}
+
+_gh-repository-policy-properties-check() {
+  # Check property repa: vypíše OK, nebo "DIFF<TAB><detail prvního rozdílu>";
+  # rc 1 při chybě API nebo konfigurace.
+  # Použití: _gh-repository-policy-properties-check <repo_path> <projectKey>
+  local _repo_path="$1" _key="$2" _expected _mhn _dt _diff
+  _expected=$(_gh-repository-policy-properties-expected-mhn "$_key") || return 1
+  _gh-repository-policy-properties-read "$_repo_path" _mhn _dt || return 1
+  _diff=$(_gh-repository-policy-properties-diff "$_expected" "$_mhn" "$_dt")
+  if [[ -z "$_diff" ]]; then
+    printf 'OK\n'
+  else
+    printf 'DIFF\t%s\n' "$_diff"
+  fi
+}
+
+_gh-repository-policy-properties-apply() {
+  # Srovná property repa s policy jedním PATCH (částečná aktualizace –
+  # neuvedené property zůstávají): MHN jen při rozdílu, Deployment_Target
+  # = GH_DEPLOYMENT_TARGET_DEFAULT jen je-li prázdná. Nikdy neposílá
+  # Deployment_Target, která už hodnotu má; bez rozdílu neposílá nic
+  # (žádný zbytečný zápis ani šum v historii repa).
+  # Použití: _gh-repository-policy-properties-apply <repo_path> <projectKey> <mhn_observed> <dt_observed>
+  local _repo_path="$1" _key="$2" _mhn="$3" _dt="$4" _expected _items=""
+  _gh-validate-admin-team "$_key" GITHUB_REPO_TEAMS || return 1
+  _require_vars GH_DEPLOYMENT_TARGET_DEFAULT || return 1
+  _expected=$(_gh-repository-policy-properties-expected-mhn "$_key") || return 1
+  [[ "$_mhn" == "$_expected" ]] || \
+    _items="{\"property_name\":\"MHN\",\"value\":\"$_expected\"}"
+  [[ -n "$_dt" ]] || \
+    _items+="${_items:+,}{\"property_name\":\"Deployment_Target\",\"value\":\"$GH_DEPLOYMENT_TARGET_DEFAULT\"}"
+  [[ -n "$_items" ]] || return 0
+  _gh-api-input-retry "repos/$_repo_path/properties/values" PATCH \
+    "{\"properties\":[$_items]}" "custom properties repa '$_repo_path'"
+}
+
 _gh-repository-policy-check() {
   # Check policy: týmy → rulesety (sémantické porovnání + smoke-test) →
-  # Jenkins collaborator. Výsledek OK/DIFF/ERROR a detail přes nameref.
+  # Jenkins collaborator → governance bot collaborator (admin) → custom
+  # properties (MHN dle conf.d, Deployment_Target nastavená).
+  # Výsledek OK/DIFF/ERROR a detail (první rozdíl) přes nameref.
   # Použití: _gh-repository-policy-check <repo_path> <branch> <key> <result_name> <detail_name>
   local _repo_path="$1" _branch="$2" _key="$3" _result_name="$4" _detail_name="$5"
-  local _login _configured _decision _teams _rulesets _collaborator
+  local _login _configured _decision _teams _rulesets _collaborator _bot _props
   declare -n _result_ref="$_result_name" _detail_ref="$_detail_name"
   _result_ref=ERROR; _detail_ref="policy check failed"
+  _require_vars GH_GOVERNANCE_BOT_USER || return 0
   _gh-jenkins-policy-resolve "$_key" _login _configured _decision || return 0
   _teams=$(_gh-repository-policy-teams-check "$_repo_path" "$_key") || return 0
   _rulesets=$(_gh-ruleset-check "$_repo_path" "$_branch" "$_key" "$_login") || return 0
-  _collaborator=$(_gh-repository-policy-collaborator-check "$_repo_path" "$_login" "$_decision") || return 0
+  _collaborator=$(_gh-repository-policy-collaborator-check "$_repo_path" "$_login" "$_decision" push) || return 0
+  _bot=$(_gh-repository-policy-collaborator-check "$_repo_path" "$GH_GOVERNANCE_BOT_USER" allowed admin) || return 0
+  _props=$(_gh-repository-policy-properties-check "$_repo_path" "$_key") || return 0
 
   _result_ref=OK; _detail_ref=-
   if [[ "$_teams" != OK ]]; then
@@ -437,6 +619,10 @@ _gh-repository-policy-check() {
     _result_ref=DIFF; _detail_ref="rulesets differ"
   elif [[ "$_collaborator" != OK ]]; then
     _result_ref=DIFF; _detail_ref="Jenkins collaborator differs"
+  elif [[ "$_bot" != OK ]]; then
+    _result_ref=DIFF; _detail_ref="governance bot collaborator differs"
+  elif [[ "$_props" != OK ]]; then
+    _result_ref=DIFF; _detail_ref="${_props#DIFF$'\t'}"
   fi
 }
 
@@ -476,18 +662,23 @@ _gh-repository-policy-reconcile-teams() {
 }
 
 _gh-repository-policy-assign() {
-  # Assign policy: payloady fail-fast → týmy → collaborator (před apply –
+  # Assign policy: payloady fail-fast → týmy → governance bot (admin
+  # collaborator – bez něj bot PAT repo nespravuje) → custom properties
+  # (MHN, chybějící Deployment_Target) → Jenkins collaborator (před apply –
   # bypass neuděluje právo zápisu) → jediný ruleset apply s bypass seznamem
   # rovnou v payloadu. Argument <branch> zůstává kvůli rozhraní call sites
-  # (rulesety cílí větve přes klíč branches profilů, ne parametrem).
+  # (rulesety cílí větve přes klíč branches profilů).
   # Použití: _gh-repository-policy-assign <repo_path> <branch> <projectKey>
   local _repo_path="$1" _key="$3"
-  local _login _configured _decision
+  local _login _configured _decision _mhn_observed _dt_observed
   local -A _payloads=()
   _gh-validate-admin-team "$_key" GITHUB_REPO_TEAMS || return 1
   _gh-jenkins-policy-resolve "$_key" _login _configured _decision || return 1
   _gh-ruleset-payloads-build "$_key" "$_login" _payloads || return 1
   _gh-repository-policy-reconcile-teams "$_repo_path" "$_key" || return 1
+  _gh-governance-bot-collaborator-add "$_repo_path" "$_key" || return 1
+  _gh-repository-policy-properties-read "$_repo_path" _mhn_observed _dt_observed || return 1
+  _gh-repository-policy-properties-apply "$_repo_path" "$_key" "$_mhn_observed" "$_dt_observed" || return 1
   if [[ "$_decision" == allowed ]]; then
     _gh-jenkins-collaborator-add "$_repo_path" "$_key" "$_login" || return 1
     _gh-ruleset-apply "$_repo_path" "$_key" "$_login" || return 1
@@ -541,7 +732,8 @@ _gh-validate-admin-team() {
 
   IFS=',' read -ra _entries <<< "$_teams"
   for _entry in "${_entries[@]}"; do
-    if [[ ! "$_entry" =~ ^[[:alnum:]][[:alnum:]_.-]*\|(pull|triage|push|maintain|admin|read|write)$ ]]; then
+    # Formát položky sdílí s parserem conf.d (lib/gh-conf.sh: _GH_CONF_TEAM_REGEX).
+    if ! _gh-match "$_entry" "$_GH_CONF_TEAM_REGEX"; then
       echo "Chyba: Neplatny zaznam tymu '$_entry' v klici repository_teams projektu '$_key' (conf.d/projects/$_key.conf)." >&2
       echo "       Ocekavany format je team-slug|permission." >&2
       return 1

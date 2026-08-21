@@ -38,6 +38,12 @@ _GH_COMMON_DEFS_LOADED=1
 # (nereportuje, neodebírá, nemění oprávnění); v repository_teams je zakázán.
 : "${GH_SECURITY_MANAGERS_TEAM:=security-managers}"
 
+# Výchozí hodnota custom property Deployment_Target spravovaných rep
+# (defs/defs.md: ghDeploymentTargetDefault). Repository policy ji jen doplní,
+# když property chybí; existující hodnotu (v rukou admina repa) nemění ani
+# nehlásí. Migrace (bb-migrate.sh) ji nastavuje natvrdo – jde o nové repo.
+: "${GH_DEPLOYMENT_TARGET_DEFAULT:=PRODUCTION}"
+
 # Governance repo — autoritativní umístění conf.d na GitHubu.
 # Odvozený identifikátor <ghGlobalPrefix>-governance-repository (defs/defs.md).
 : "${GH_GOVERNANCE_REPO:=${GH_REPO_PREFIX}-governance-repository}"
@@ -46,6 +52,22 @@ _GH_COMMON_DEFS_LOADED=1
 # Testovací default; produkce: czmh-bbpk-governance-admins.
 # gov-init.sh tým nezakládá – jen ověřuje jeho existenci.
 : "${GH_GOVERNANCE_ADMIN_TEAM:=test-gov-admins}"
+
+# Login governance bota (machine user gov workflows). Povinná, implicitní
+# součást repository policy: policy assign ho přidá jako přímého collaboratora
+# s právem admin na každé spravované repo (bot není org owner — bez toho by
+# jeho PAT zmigrovaná/založená repa neviděl a reconcile by na nich selhal).
+# Prázdná hodnota = chyba preflightu.
+# Testovací default: účet, pod kterým běží testy; produkce: czmh-mhi-git-bbpk-governance-bot.
+: "${GH_GOVERNANCE_BOT_USER:=mhgithubcopilot}"
+
+# Bypass adminů gov repa v rulesetu výchozí větve gov-default-branch
+# (gov-init.sh; docs/navrh/ochrana-gov-repa.md): pull_request = admini repa
+# smějí mergnout PR bez cizího schválení, ale ne pushovat přímo; none = bez
+# výjimky. Testovací default pull_request (jediný správce by se jinak zamkl);
+# produkce: none – pak musí mít GH_GOVERNANCE_ADMIN_TEAM aspoň dva členy.
+# Bot (GH_GOVERNANCE_BOT_USER) má bypass always vždy (zápis state/).
+: "${GH_GOVERNANCE_ADMIN_BYPASS:=pull_request}"
 
 # Viditelnost rep zakládaných governancí (workflow new-repository / gh-new).
 # Nikdy natvrdo v kódu. Testovací prostředí (GitHub Free org): public;
@@ -104,11 +126,30 @@ _GH_GHNAME_REGEX='^[a-z0-9][a-z0-9._-]*$'
 # projektu najednou se do ní nemusí vejít, proto se hledání dávkuje.
 : "${GH_SEARCH_REF_BATCH:=150}"
 
-# Kořen pracovních rep funkcí (docs/navrh/pracovni-repa-funkci.md): trvalé
+# Kořen pracovních rep funkcí (docs/implementovano/pracovni-repa-funkci.md): trvalé
 # klony (gov repo, řídicí repa migrace), se kterými pracují výhradně funkce.
 # Není to cache — obsah se commituje a pushuje; nesmí ho mazat čisticí nástroje.
 # Nezapomeň: používej ${HOME}/..., ne ~/... (tilda se neexpanduje ve všech kontextech).
 : "${GH_WORK_REPOS_ROOT:=${HOME}/.local/state/gh-work}"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Locale-nezávislé regex validace (docs/locale-rozsahy-regex-validace.md).
+# Definováno před sourcováním lib/ modulů níže — _gh-conf-load validuje
+# už při načítání shellu.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_gh-match() {
+  # Regex match nezávislý na locale uživatele: v ne-C locale (cs_CZ.UTF-8)
+  # rozsahy [a-z]/[A-Z] matchují podle collation i opačnou velikost písmen
+  # a POSIX třídy ([[:alnum:]]) pouštějí diakritiku. LC_ALL=C je local —
+  # platí jen po dobu matche a po návratu se obnoví; přebije i uživatelovo
+  # LC_ALL. $2 je záměrně bez uvozovek na pravé straně =~ (quoted RHS by
+  # regex degradoval na literál). Vrací jen ano/ne — na BASH_REMATCH po
+  # volání nespoléhej (pro capture skupiny použij přímé [[ =~ ]]).
+  # Použití: _gh-match <řetězec> <ERE regex>    (negace: ! _gh-match ...)
+  local LC_ALL=C
+  [[ "$1" =~ $2 ]]
+}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Lokální uživatelské přepsání (gitignorováno).
@@ -120,7 +161,7 @@ _GH_COMMON_LOCAL="$_GH_COMMON_DIR/gh-common-defs.local.sh"
 [[ -f "$_GH_COMMON_LOCAL" ]] && source "$_GH_COMMON_LOCAL"
 unset _GH_COMMON_LOCAL
 
-# Zámek a sync pracovních rep funkcí (docs/navrh/pracovni-repa-funkci.md).
+# Zámek a sync pracovních rep funkcí (docs/implementovano/pracovni-repa-funkci.md).
 if ! source "$_GH_COMMON_DIR/lib/gh-work-repo.sh"; then
   echo "Chyba: Nepodařilo se načíst lib/gh-work-repo.sh." >&2
 fi
@@ -132,7 +173,7 @@ fi
 # parserem lib/gh-conf.sh – žádné sourcování konfiguračních souborů.
 # Formát: docs/readme/README_COMMON.md.
 # ══════════════════════════════════════════════════════════════════════════════
-# Zdroj conf.d (docs/navrh/pracovni-repa-funkci.md):
+# Zdroj conf.d (docs/implementovano/pracovni-repa-funkci.md):
 # 1. GH_CONFD_ROOT (env nebo .local.sh) — vývojářský override „čti odsud
 #    a nesynchronizuj" (pískoviště pro nepushnuté změny konfigurace),
 # 2. GitHub Actions (checkout gov repa na runneru) — conf.d vedle tohoto
@@ -145,6 +186,11 @@ fi
 # 0 = lokální conf.d bez synchronizace. Rozhoduje se jednou při sourcování —
 # GH_CONFD_ROOT nastavená jen po dobu source (VAR=x source ...) nesmí režim
 # ztratit za běhu funkcí.
+# _GH_CONFD_FRESH: 1 = konfigurace v paměti pochází z právě provedené
+# synchronizace s GitHubem (_gh-confd-sync bez --no-sync); 0 = čtena bez
+# synchronizace (start shellu, --no-sync). Rozlišuje, jakou radu dát
+# uživateli, když projekt v konfiguraci chybí (_gh-require-project).
+_GH_CONFD_FRESH=0
 if [[ -n "${GH_CONFD_ROOT:-}" ]]; then
   _GH_COMMON_CONF_D="$GH_CONFD_ROOT"
   _GH_CONFD_SYNC=0
@@ -161,14 +207,36 @@ if source "$_GH_COMMON_DIR/lib/gh-conf.sh"; then
       echo "Chyba: Konfigurace conf.d nebyla načtena – oprav chyby výše. Funkce pracující s projekty nebudou fungovat." >&2
   elif [[ -n "${GH_CONFD_ROOT:-}" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
     echo "Chyba: Adresář conf.d '$_GH_COMMON_CONF_D' neexistuje – konfigurace nenačtena." >&2
-  else
-    # Měkký první běh: pracovní klon vznikne při prvním spuštění funkce,
-    # která konfiguraci potřebuje (_gh-confd-sync).
-    echo "Pracovní klon gov repa zatím neexistuje – naclonuje ho první funkce, která konfiguraci potřebuje." >&2
   fi
+  # Jinak měkký první běh (tichý): pracovní klon vznikne při prvním spuštění
+  # funkce, která konfiguraci potřebuje (_gh-confd-sync).
 else
   echo "Chyba: Nepodařilo se načíst lib/gh-conf.sh." >&2
 fi
+
+_gh-gov-repo-sync-locked() {
+  # Zamkne a synchronizuje pracovní klon gov repa v <dir> (clone při prvním
+  # běhu, jinak ff-only pull). Po úspěchu ZŮSTÁVÁ ZÁMEK DRŽEN — volající ho
+  # uvolní přes _gh-work-repo-unlock; při selhání syncu se uvolní zde.
+  # Sdílí _gh-confd-sync (conf.d) a governance/gov-sync.sh (deploy kódu).
+  # Použití: _gh-gov-repo-sync-locked <dir>
+  local _dir="$1"
+  _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_GOVERNANCE_REPO || return 1
+  local _url="https://${GITHUB_ORG_HOSTNAME}/${GITHUB_ORG}/${GH_GOVERNANCE_REPO}.git"
+  # Stručná průběhová hláška (stderr); cestu a detail vypisuje až chyba
+  # (_gh-work-repo-error).
+  if [[ -d "$_dir" ]]; then
+    echo "Aktualizuji pracovní klon gov repa..." >&2
+  else
+    echo "Klonuji pracovní klon gov repa..." >&2
+  fi
+  _gh-work-repo-lock "$_dir" || return 1
+  if ! _gh-work-repo-sync "$_dir" "$_url"; then
+    _gh-work-repo-unlock "$_dir"
+    return 1
+  fi
+  return 0
+}
 
 _gh-confd-sync() {
   # Synchronizuje pracovní klon gov repa (zdroj conf.d) a znovu načte
@@ -195,19 +263,29 @@ _gh-confd-sync() {
       echo "Chyba: Pracovní klon gov repa není k dispozici (--no-sync nemá z čeho číst) – spusť operaci bez --no-sync." >&2
       return 1
     fi
+    _GH_CONFD_FRESH=0
     return 0
   fi
-  _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_GOVERNANCE_REPO || return 1
-  local _url="https://${GITHUB_ORG_HOSTNAME}/${GITHUB_ORG}/${GH_GOVERNANCE_REPO}.git"
-  [[ -d "$_dir" ]] || \
-    echo "Pracovní klon gov repa neexistuje – klonuji '${_url}' do '${_dir}'..."
-  _gh-work-repo-lock "$_dir" || return 1
-  if ! _gh-work-repo-sync "$_dir" "$_url" || ! _gh-conf-load "$_GH_COMMON_CONF_D"; then
+  _gh-gov-repo-sync-locked "$_dir" || return 1
+  if ! _gh-conf-load "$_GH_COMMON_CONF_D"; then
     _gh-work-repo-unlock "$_dir"
     return 1
   fi
+  _GH_CONFD_FRESH=1
   [[ $_hold -eq 1 ]] || _gh-work-repo-unlock "$_dir"
   return 0
+}
+
+_gh-confd-sync-ro() {
+  # Sync conf.d pro read-only funkce s volbou --no-sync: podle příznaku
+  # synchronizuje (0/false), nebo čte poslední synchronizovaný stav (1/true).
+  # Jedno místo pro opakované „if no_sync“ volajících funkcí.
+  # Použití: _gh-confd-sync-ro <no_sync: 0|1|false|true> || return 1
+  case "$1" in
+    1|true)  _gh-confd-sync --no-sync ;;
+    0|false) _gh-confd-sync ;;
+    *) echo "Chyba: _gh-confd-sync-ro: neplatný příznak '$1' (0|1|false|true)." >&2; return 1 ;;
+  esac
 }
 
 _mhn_for_key() {
@@ -253,14 +331,15 @@ _require_vars() {
 }
 
 _bb-require-pk() {
-  # Ověří projectKey a uloží MHN do nameref proměnné.
+  # Ověří existenci projectKey (_gh-require-project, akční hláška) a uloží
+  # jeho MHN do nameref proměnné.
   # Použití: local _mhn; _bb-require-pk <projectKey> _mhn || return 1
   local _key="$1"
   declare -n _mhn_ref="$2"
+  _gh-require-project "$_key" || return 1
   _mhn_ref=$(_mhn_for_key "$_key")
   if [[ -z "$_mhn_ref" ]]; then
-    echo "Chyba: projectKey '$_key' není nakonfiguróván v žádném conf.d souboru." >&2
-    echo "       Dostupné hodnoty: $(_bb_all_project_keys)" >&2
+    echo "Chyba: GH projekt '$_key' nemá v conf.d/projects/$_key.conf klíč domain (MHN nelze určit)." >&2
     return 1
   fi
 }
@@ -308,20 +387,63 @@ _gh-workspace-dirs() {
   return 0
 }
 
+_gh-fmt-duration() {
+  # Naplní nameref kompaktním zápisem doby: <1 s celé ms (215ms), do 60 s sekundy
+  # s jedním desetinným místem (12.3s), do 1 h minuty a sekundy (1m2s), jinak hodiny
+  # a minuty (1h2m). Nulová složka se píše vždy (1m0s). Zaokrouhluje na nejbližší
+  # jednotku posledního místa; pásmo se volí až ze zaokrouhlené hodnoty, aby
+  # nevzniklo „60.0s" ani „60m0s". Čistá Bash aritmetika — bez forku (tiskne se
+  # pro každé repo).
+  # Použití: local _s; _gh-fmt-duration <ms> _s
+  local _ms="$1"
+  declare -n _out_ref="$2"
+  local _tenths _sec _min
+  if (( _ms < 1000 )); then
+    _out_ref="${_ms}ms"; return 0
+  fi
+  _tenths=$(( (_ms + 50) / 100 ))
+  if (( _tenths < 600 )); then
+    _out_ref="$(( _tenths / 10 )).$(( _tenths % 10 ))s"; return 0
+  fi
+  _sec=$(( (_ms + 500) / 1000 ))
+  if (( _sec < 3600 )); then
+    _out_ref="$(( _sec / 60 ))m$(( _sec % 60 ))s"; return 0
+  fi
+  _min=$(( (_ms + 30000) / 60000 ))
+  _out_ref="$(( _min / 60 ))h$(( _min % 60 ))m"
+}
+
 _bb-eta-print() {
   # Vypíše ETA na základě průměrné doby zpracování. Bez výstupu pokud eta_count=0.
+  # Oba časy formátuje _gh-fmt-duration; „~" značí odhad zbývajícího času,
+  # průměr je změřený, proto bez „~".
   # Použití: _bb-eta-print <eta_sum_ms> <eta_count> <total> <count> <slug>
   local _sum_ms="$1" _cnt="$2" _total="$3" _count="$4" _slug="$5"
   [[ $_cnt -eq 0 ]] && return 0
   local _avg_ms=$(( _sum_ms / _cnt ))
   local _rem_ms=$(( (_total - _count + 1) * _avg_ms ))
-  local _str
-  if   [[ $_rem_ms -lt 1000  ]]; then _str="${_rem_ms}ms"
-  elif [[ $_rem_ms -lt 60000 ]]; then _str="~$(( _rem_ms / 1000 ))s"
-  else                                 _str="~$(( _rem_ms / 60000 ))min"
-  fi
-  printf '[%d/%d]  Zbývá: %s  (průměr: %dms/repo)   %s\n' \
-    "$_count" "$_total" "$_str" "$_avg_ms" "$_slug"
+  local _rem_str _avg_str
+  _gh-fmt-duration "$_rem_ms" _rem_str
+  _gh-fmt-duration "$_avg_ms" _avg_str
+  printf '[%d/%d]  Zbývá: ~%s  (průměr: %s/repo)   %s\n' \
+    "$_count" "$_total" "$_rem_str" "$_avg_str" "$_slug"
+}
+
+_gh-summary-row() {
+  # Řádek „<odsazení><popisek> <hodnota>" s hodnotami pod sebou (popisek
+  # doplněný mezerami na <šířka> znaků) — závěrečné souhrny toolů, detail repa
+  # v gh-info, stav migrace. printf '%-Ns' i ${#} mimo UTF-8 locale počítají
+  # bajty, každé písmeno s diakritikou by sloupec posunulo o jedna — délka
+  # popisku se proto počítá nezávisle na locale: v subshellu s LC_ALL=C se
+  # z UTF-8 řetězce odstraní pokračovací bajty (0x80–0xBF) a zbylé bajty =
+  # znaky. Jeden fork na řádek je přijatelný (jednotky řádků na běh).
+  # Použití: _gh-summary-row <popisek> <hodnota> [<šířka>=30] [<odsazení>=2]
+  # Popisek delší než <šířka> se nedoplňuje (výplň 0), hodnota následuje za
+  # jednou mezerou.
+  local _label="$1" _value="$2" _width="${3:-30}" _indent="${4:-2}" _len _pad
+  _len=$(LC_ALL=C; _t="${_label//[$'\x80'-$'\xbf']/}"; printf '%s' "${#_t}")
+  _pad=$(( _width - _len )); (( _pad > 0 )) || _pad=0
+  printf '%*s%s%*s %s\n' "$_indent" '' "$_label" "$_pad" '' "$_value"
 }
 
 _gh-project-exists() {
@@ -341,6 +463,37 @@ _gh-project-exists() {
   return 1
 }
 
+_gh-require-project() {
+  # Ověří existenci GH projektu (_gh-project-exists) a neexistenci ohlásí
+  # akční chybou — uživatel má z hlášky poznat, kde se konfigurace hledala
+  # a co udělat: po synchronizaci připomene, že se projeví jen pushnutý
+  # commit gov repa (GitHub je jediný zdroj pravdy, lokální checkout funkce
+  # nečtou); při čtení bez synchronizace (--no-sync, start shellu) doporučí
+  # běh se synchronizací. Vždy vypíše dostupné projectKey.
+  # Návrat: 0 = existuje; 1 = neexistuje nebo nelze zjistit (chyba vypsána).
+  # Použití: _gh-require-project <projectKey> || return 1
+  local _key="$1" _where _hint=""
+  _gh-project-exists "$_key"
+  case $? in
+    0) return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  if [[ "${_GH_CONFD_SYNC:-0}" != "1" ]]; then
+    _where="conf.d '${_GH_COMMON_CONF_D}' neobsahuje projects/${_key}.conf"
+  elif [[ "${_GH_CONFD_FRESH:-0}" == "1" ]]; then
+    _where="gov repo ${GITHUB_ORG}/${GH_GOVERNANCE_REPO} na GitHubu neobsahuje conf.d/projects/${_key}.conf"
+    _hint="Pokud jsi projekt právě přidal, ověř, že je commit pushnutý do gov repa (funkce čtou jen GitHub, ne lokální checkout)."
+  else
+    _where="naposledy synchronizovaná konfigurace neobsahuje conf.d/projects/${_key}.conf"
+    _hint="Konfigurace byla čtena bez synchronizace s GitHubem – spusť příkaz bez --no-sync."
+  fi
+  echo "Chyba: GH projekt '${_key}' neexistuje: ${_where}." >&2
+  [[ -z "$_hint" ]] || echo "       $_hint" >&2
+  echo "       Dostupné projekty: $(_bb_all_project_keys)" >&2
+  return 1
+}
+
 _gh-list-project-repos() {
   # Vrátí úplný seznam jmen repos jedné podmnožiny (jeden název na řádek) pro daný projectKey.
   # Závazný postup (defs/defs.md): dotaz topic:ghp-<projectKey> na Search API,
@@ -350,7 +503,8 @@ _gh-list-project-repos() {
   # Úplnost zaručuje axiom Kapacita projektu (≤ 1000 rep v každé podmnožině).
   # gh search repos --hostname není na GHES podporováno, proto gh api.
   # Vyhledává jen pro existující GH projekt; existenci ověřuje přes
-  # _gh-project-exists nad naposledy synchronizovanou konfigurací conf.d.
+  # _gh-require-project nad naposledy načtenou konfigurací conf.d —
+  # synchronizaci (_gh-confd-sync) zajišťuje volající funkce.
   # Pro neexistující GH projekt vrátí chybu.
   # Použití: _gh-list-project-repos <projectKey> [archived]
   #   archived: false (výchozí) = nearchivovaná repa, true = archivovaná repa
@@ -361,13 +515,7 @@ _gh-list-project-repos() {
     true|false) ;;
     *) echo "Chyba: druhý argument (archived) musí být true nebo false." >&2; return 1 ;;
   esac
-  _gh-project-exists "$_key"
-  case $? in
-    0) ;;
-    1) echo "Chyba: GH projekt '${_key}' neexistuje (conf.d/projects/${_key}.conf v governance repu nenalezen)." >&2
-       return 1 ;;
-    *) return 1 ;;
-  esac
+  _gh-require-project "$_key" || return 1
   local _name_prefix="${GH_REPO_PREFIX}-${_key}-"
   local _query="org:${GITHUB_ORG}+topic:ghp-${_key}+archived:${_archived}"
   local _all

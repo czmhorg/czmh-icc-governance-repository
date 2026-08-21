@@ -10,9 +10,9 @@
 # přes jq; hodnoty se validují regexy před prvním použitím; žádný eval/source.
 # Modul běží jen v GitHub Actions (jq je k dispozici; lokální omezení na
 # builtiny se na něj nevztahuje).
-# Závislosti: gh-common-defs.sh (_GH_CONF, _GH_GHNAME_REGEX, _require_vars),
-# lib/gh-conf.sh (_GH_CONF_LOGIN_REGEX), lib/gh-governance-repo-ops.sh
-# (_gh-governance-repo-name).
+# Závislosti: gh-common-defs.sh (_GH_CONF, _GH_GHNAME_REGEX, _gh-match,
+# _require_vars), lib/gh-conf.sh (_GH_CONF_LOGIN_REGEX),
+# lib/gh-governance-repo-ops.sh (_gh-governance-repo-name).
 [[ -n "${_GH_GOVERNANCE_ISSUE_LOADED:-}" ]] && \
   declare -F _gh-governance-issue-parse >/dev/null && return 0
 _GH_GOVERNANCE_ISSUE_LOADED=1
@@ -41,7 +41,7 @@ _gh-governance-issue-parse() {
     return 2
   fi
   _parsed_ref[number]="$_number"
-  if [[ ! "$_login" =~ $_GH_CONF_LOGIN_REGEX || "$_login" == *--* ]]; then
+  if ! _gh-match "$_login" "$_GH_CONF_LOGIN_REGEX" || [[ "$_login" == *--* ]]; then
     _parsed_ref[reject]=invalid_login
     return 1
   fi
@@ -69,11 +69,11 @@ _gh-governance-issue-parse() {
     _parsed_ref[reject]=missing_key
     return 1
   fi
-  if [[ ! "${_parsed_ref[body_project_key]}" =~ $_GH_GOVERNANCE_PROJECT_KEY_REGEX ]]; then
+  if ! _gh-match "${_parsed_ref[body_project_key]}" "$_GH_GOVERNANCE_PROJECT_KEY_REGEX"; then
     _parsed_ref[reject]=invalid_project_key
     return 1
   fi
-  if [[ ! "${_parsed_ref[body_repo_name]}" =~ $_GH_GHNAME_REGEX ]]; then
+  if ! _gh-match "${_parsed_ref[body_repo_name]}" "$_GH_GHNAME_REGEX"; then
     _parsed_ref[reject]=invalid_repo_name
     return 1
   fi
@@ -139,7 +139,7 @@ _gh-governance-track-delete-body-parse() {
   fi
   _pkey="${_rest%%-*}"
   _gname="${_rest#*-}"
-  if [[ ! "$_pkey" =~ $_GH_GOVERNANCE_PROJECT_KEY_REGEX ]]; then
+  if ! _gh-match "$_pkey" "$_GH_GOVERNANCE_PROJECT_KEY_REGEX"; then
     _td_ref[reject]=invalid_repo_path
     return 1
   fi
@@ -147,7 +147,7 @@ _gh-governance-track-delete-body-parse() {
     _td_ref[reject]=invalid_repo_path
     return 1
   }
-  if [[ ! "${_td_ref[body_delete_issue]}" =~ $_url_regex ]]; then
+  if ! _gh-match "${_td_ref[body_delete_issue]}" "$_url_regex"; then
     _td_ref[reject]=invalid_delete_issue
     return 1
   fi
@@ -180,7 +180,7 @@ _gh-governance-issue-parse-step-track-delete() {
     echo "Chyba: Event neobsahuje číslo issue." >&2
     return 1
   fi
-  if [[ ! "$_login" =~ $_GH_CONF_LOGIN_REGEX || "$_login" == *--* ]]; then
+  if ! _gh-match "$_login" "$_GH_CONF_LOGIN_REGEX" || [[ "$_login" == *--* ]]; then
     echo "Issue #$_number odmítnuto: invalid_login"
     _gh-governance-issue-close-rejected "$_number" invalid_login || return 1
     echo "result=rejected" >> "$_out"

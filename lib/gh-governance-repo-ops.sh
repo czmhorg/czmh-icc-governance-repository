@@ -16,7 +16,7 @@ _gh-governance-repo-name() {
   # <GH_REPO_PREFIX>-<projectKey>-<ghName>.
   # Použití: _gh-governance-repo-name <projectKey> <ghName>
   local _key="$1" _name="$2" _repo_name
-  if [[ ! "$_name" =~ $_GH_GHNAME_REGEX ]]; then
+  if ! _gh-match "$_name" "$_GH_GHNAME_REGEX"; then
     echo "Chyba: ghName '$_name' neodpovídá formátu $_GH_GHNAME_REGEX (defs/defs.md)." >&2
     return 1
   fi
@@ -98,17 +98,20 @@ _gh-governance-managed-verify() {
 
 _gh-governance-apply-policy-and-state() {
   # Společné jádro new/unarchive/reconcile: aplikuje repository policy,
-  # odebere týmy dle diffu konfigurace ukazatel→RUN_SHA a zapíše ukazatel
-  # do checkoutu (commit+push dělá volající přes _gh-governance-state-push).
+  # odebere týmy a Jenkins login staré domény dle diffu konfigurace
+  # ukazatel→RUN_SHA a zapíše ukazatel do checkoutu (commit+push dělá
+  # volající přes _gh-governance-state-push).
   # Adopce (repo bez ukazatele): nic se neodebírá, ukazatel se založí.
-  # Výstupy: nameref pole odebraných týmů, nameref adopce (true/false).
-  # Použití: _gh-governance-apply-policy-and-state <repo_path> <ghRepoName> <branch> <projectKey> <removed_array_name> <adopted_flag_name>
+  # Výstupy: nameref pole odebraných týmů, nameref adopce (true/false),
+  # nameref odebraného Jenkins loginu (prázdný = nic).
+  # Použití: _gh-governance-apply-policy-and-state <repo_path> <ghRepoName> <branch> <projectKey> <removed_array_name> <adopted_flag_name> <removed_login_name>
   local _repo_path="$1" _repo_name="$2" _branch="$3" _key="$4"
-  declare -n _removed_ref="$5" _adopted_ref="$6"
-  local _pointer_sha="" _run_sha _rm_out
+  declare -n _removed_ref="$5" _adopted_ref="$6" _removed_login_ref="$7"
+  local _pointer_sha="" _run_sha _rm_out _rm_login=""
   local -a _rm_teams=()
   _removed_ref=()
   _adopted_ref=false
+  _removed_login_ref=""
   _run_sha=$(_gh-governance-run-sha) || return 1
   _pointer_sha=$(_gh-governance-state-read "$_repo_name")
   case $? in
@@ -126,6 +129,13 @@ _gh-governance-apply-policy-and-state() {
     fi
     mapfile -t _removed_ref < "$_rm_out"
     rm -f "$_rm_out"
+    # Jenkins login staré domény (přesun projektu / výměna jenkins_user):
+    # stejný mechanismus diffu ukazatele, DELETE 404-tolerantně.
+    _gh-governance-jenkins-to-remove "$_key" "$_pointer_sha" "$_run_sha" _rm_login || return 1
+    if [[ -n "$_rm_login" ]]; then
+      _gh-jenkins-collaborator-remove "$_repo_path" "$_key" "$_rm_login" || return 1
+      _removed_login_ref="$_rm_login"
+    fi
   fi
   _gh-governance-state-write "$_repo_name" "$_run_sha"
 }
@@ -138,7 +148,7 @@ _gh-governance-new() {
   # Existující repo není chyba – provede se jen konvergence.
   # Použití: _gh-governance-new <projectKey> <ghName>
   local _key="$1" _name="$2" _mhn _repo_name _repo_path _branch _attempt
-  local _adopted=false
+  local _adopted=false _removed_login=""
   local -a _removed=()
   local -A _info=()
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX GH_PROJECT_TOPIC_PREFIX GH_NEW_REPO_VISIBILITY || return 1
@@ -196,11 +206,13 @@ _gh-governance-new() {
     --add-topic "${GH_PROJECT_TOPIC_PREFIX}${_key}" >/dev/null || return 1
 
   _gh-governance-apply-policy-and-state "$_repo_path" "$_repo_name" "$_branch" "$_key" \
-    _removed _adopted || return 1
+    _removed _adopted _removed_login || return 1
   _gh-governance-manifest-upsert "$_key" "$_name" false || return 1
   _gh-governance-state-push "new-repository: $_repo_name" || return 1
   [[ ${#_removed[@]} -gt 0 ]] && \
     printf 'Odebrán tým dle diffu konfigurace: %s\n' "${_removed[@]}"
+  [[ -n "$_removed_login" ]] && \
+    echo "Odebrán Jenkins collaborator '$_removed_login' dle diffu konfigurace."
   echo "Hotovo: repo '$_repo_path' odpovídá INI konfiguraci projektu '$_key'."
 }
 
@@ -240,7 +252,7 @@ _gh-governance-unarchive() {
   # Nearchivované repo není chyba – provede se jen konvergence.
   # Použití: _gh-governance-unarchive <projectKey> <ghName>
   local _key="$1" _name="$2" _mhn _repo_name _repo_path _branch
-  local _adopted=false
+  local _adopted=false _removed_login=""
   local -a _removed=()
   local -A _info=()
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX GH_PROJECT_TOPIC_PREFIX || return 1
@@ -268,13 +280,15 @@ _gh-governance-unarchive() {
     return 1
   fi
   _gh-governance-apply-policy-and-state "$_repo_path" "$_repo_name" "$_branch" "$_key" \
-    _removed _adopted || return 1
+    _removed _adopted _removed_login || return 1
   _gh-governance-manifest-upsert "$_key" "$_name" false || return 1
   _gh-governance-state-push "unarchive-repository: $_repo_name" || return 1
   [[ "$_adopted" == true ]] && \
     echo "Adopce repa: ukazatel posledního aplikovaného stavu založen, nic se neodebíralo."
   [[ ${#_removed[@]} -gt 0 ]] && \
     printf 'Odebrán tým dle diffu konfigurace: %s\n' "${_removed[@]}"
+  [[ -n "$_removed_login" ]] && \
+    echo "Odebrán Jenkins collaborator '$_removed_login' dle diffu konfigurace."
   echo "Hotovo: repo '$_repo_path' odpovídá INI konfiguraci projektu '$_key'."
 }
 

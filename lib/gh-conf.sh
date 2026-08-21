@@ -7,6 +7,8 @@
 # Formát a pravidla: docs/implementovano/zadani-konverze-confd.md.
 # Běží při každém startu shellu (source z gh-common-defs.sh) – v load path
 # jsou povoleny pouze bash builtiny, žádné spouštění externích procesů.
+# Závislost: _gh-match z gh-common-defs.sh (sám je jen builtin [[ =~ ]]
+# s lokálním LC_ALL=C; definován před sourcováním tohoto modulu).
 [[ -n "${_GH_CONF_LOADED:-}" ]] && \
   declare -F _gh-conf-load >/dev/null && return 0
 _GH_CONF_LOADED=1
@@ -54,7 +56,7 @@ _gh-conf-parse-file() {
     fi
     _key="${_line%%=*}"
     _value="${_line#*=}"
-    if [[ ! "$_key" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+    if ! _gh-match "$_key" '^[a-z_][a-z0-9_]*$'; then
       _gh-conf-err "$5" "$_rel" "řádek $_lineno: nevalidní klíč '$_key' (povolený formát: ^[a-z_][a-z0-9_]*\$)"
       continue
     fi
@@ -80,7 +82,7 @@ _gh-conf-load-ns() {
     [[ -f "$_f" ]] || continue
     _base="${_f##*/}"
     _name="${_base%.conf}"
-    if [[ ! "$_name" =~ $_name_regex ]]; then
+    if ! _gh-match "$_name" "$_name_regex"; then
       _gh-conf-err "$4" "$_ns/$_base" "název souboru neodpovídá formátu $_name_regex"
       continue
     fi
@@ -104,11 +106,11 @@ _gh-conf-load-domains() {
     _typ="${_base%.conf}"
     _dir="${_f%/*}"
     _mhn="${_dir##*/}"
-    if [[ ! "$_mhn" =~ ^[A-Z][A-Z0-9]*$ ]]; then
+    if ! _gh-match "$_mhn" '^[A-Z][A-Z0-9]*$'; then
       _gh-conf-err "$2" "domains/$_mhn/$_base" "název adresáře neodpovídá formátu ^[A-Z][A-Z0-9]*\$"
       continue
     fi
-    if [[ ! "$_typ" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    if ! _gh-match "$_typ" '^[a-z][a-z0-9-]*$'; then
       _gh-conf-err "$2" "domains/$_mhn/$_base" "název souboru neodpovídá formátu ^[a-z][a-z0-9-]*\$"
       continue
     fi
@@ -128,7 +130,7 @@ _gh-conf-validate-csv() {
     if [[ -z "$_item" ]]; then
       _gh-conf-err "$5" "$_rel" "klíč '$_keyname' obsahuje prázdnou položku"
       _rc=1
-    elif [[ ! "$_item" =~ $_regex ]]; then
+    elif ! _gh-match "$_item" "$_regex"; then
       _gh-conf-err "$5" "$_rel" "nevalidní položka '$_item' v klíči '$_keyname'"
       _rc=1
     fi
@@ -218,7 +220,7 @@ _gh-conf-validate-domain() {
   done
   if [[ -v _GH_CONF["domains/$_domain/jenkins_user"] ]]; then
     _login="${_GH_CONF[domains/$_domain/jenkins_user]}"
-    if [[ ! "$_login" =~ $_GH_CONF_LOGIN_REGEX || "$_login" == *--* ]]; then
+    if ! _gh-match "$_login" "$_GH_CONF_LOGIN_REGEX" || [[ "$_login" == *--* ]]; then
       _gh-conf-err "$2" "$_rel" "nevalidní GitHub login '$_login' v klíči 'jenkins_user'"
     fi
   fi
@@ -243,7 +245,7 @@ _gh-conf-validate-project() {
   done
   _domain="${_GH_CONF[projects/$_pk/domain]:-}"
   if [[ -n "$_domain" ]]; then
-    if [[ ! "$_domain" =~ $_GH_CONF_DOMAIN_REF_REGEX ]]; then
+    if ! _gh-match "$_domain" "$_GH_CONF_DOMAIN_REF_REGEX"; then
       _gh-conf-err "$2" "$_rel" "klíč 'domain' musí mít tvar <MHN>/<typ> (je '$_domain')"
     elif [[ ! -v _vp_domains["$_domain"] ]]; then
       _gh-conf-err "$2" "$_rel" "domain '$_domain' neodkazuje na existující domains/$_domain.conf"

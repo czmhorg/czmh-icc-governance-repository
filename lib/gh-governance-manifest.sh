@@ -31,11 +31,11 @@ _gh-governance-manifest-validate-args() {
   # Interní: validace <projectKey> a <ghName> proti formátům z defs/defs.md.
   # Použití: _gh-governance-manifest-validate-args <projectKey> <ghName>
   local _key="$1" _name="$2"
-  if [[ ! "$_key" =~ ^[a-z0-9]+$ ]]; then
+  if ! _gh-match "$_key" '^[a-z0-9]+$'; then
     echo "Chyba: projectKey '$_key' neodpovídá formátu ^[a-z0-9]+$ (viz defs/defs.md)." >&2
     return 1
   fi
-  if [[ ! "$_name" =~ $_GH_GHNAME_REGEX ]]; then
+  if ! _gh-match "$_name" "$_GH_GHNAME_REGEX"; then
     echo "Chyba: ghName '$_name' neodpovídá formátu $_GH_GHNAME_REGEX (viz defs/defs.md)." >&2
     return 1
   fi
@@ -44,12 +44,15 @@ _gh-governance-manifest-validate-args() {
 _gh-governance-manifest-write-atomic() {
   # Interní: zapíše stdin atomicky (tmp + mv) do manifestu; obsah setřídí
   # (klíč, název) – deterministický výstup minimalizuje rebase konflikty.
+  # LC_ALL=C: řazení po bajtech nezávisle na locale stroje – jinak by
+  # zapisovatelé s různými locale soubor přeuspořádávali
+  # (docs/locale-rozsahy-regex-validace.md).
   # Použití: ... | _gh-governance-manifest-write-atomic
   local _file _tmp
   _file=$(_gh-governance-manifest-file) || return 1
   mkdir -p "$(dirname "$_file")" || return 1
   _tmp=$(mktemp "${_file}.tmp.XXXXXX") || return 1
-  if ! sort -t$'\t' -k2,2 -k1,1 > "$_tmp"; then
+  if ! LC_ALL=C sort -t$'\t' -k2,2 -k1,1 > "$_tmp"; then
     rm -f "$_tmp"
     return 1
   fi
@@ -129,8 +132,8 @@ _gh-governance-manifest-rebuild() {
 
   _old_sorted=$(mktemp) || { rm -f "$_new"; return 1; }
   _new_sorted=$(mktemp) || { rm -f "$_new" "$_old_sorted"; return 1; }
-  [[ -f "$_file" ]] && sort "$_file" > "$_old_sorted"
-  sort "$_new" > "$_new_sorted"
+  [[ -f "$_file" ]] && LC_ALL=C sort "$_file" > "$_old_sorted"
+  LC_ALL=C sort "$_new" > "$_new_sorted"
   _added_ref=$(comm -13 "$_old_sorted" "$_new_sorted" | grep -c . || true)
   _removed_ref=$(comm -23 "$_old_sorted" "$_new_sorted" | grep -c . || true)
   rm -f "$_old_sorted" "$_new_sorted"

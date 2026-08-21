@@ -83,16 +83,85 @@ _gh-governance-org-repos-list() {
     --jq '.[] | [.name, ((.archived // false) | tostring), (.default_branch // ""), ((.topics // []) | join(","))] | @tsv'
 }
 
+_gh-governance-mhn-report-level() {
+  # Čistá funkce (offline testy): úroveň položky reportu k property MHN po
+  # aplikaci policy. Vypíše none (sedí, nebo adopce – rozdíl patří do položky
+  # adopce repa), info-filled (property chyběla), info-moved (doména projektu
+  # se od SHA ukazatele změnila = konvergence dle conf.d; i projekt, který na
+  # SHA ukazatele neexistoval) nebo warning (conf.d se nezměnilo, a přesto
+  # property neseděla = ruční změna v GH).
+  # Použití: _gh-governance-mhn-report-level <observed> <expected> <mhn_at_pointer> <adopted:true|false>
+  local _observed="$1" _expected="$2" _at_pointer="$3" _adopted="$4"
+  if [[ "$_observed" == "$_expected" || "$_adopted" == true ]]; then
+    echo none
+  elif [[ -z "$_observed" ]]; then
+    echo info-filled
+  elif [[ "$_at_pointer" != "$_expected" ]]; then
+    echo info-moved
+  else
+    echo warning
+  fi
+}
+
+_gh-governance-reconcile-properties-report() {
+  # Položky reportu k custom properties po aplikaci policy (property už jsou
+  # srovnané): chybějící Deployment_Target → info; MHN dle
+  # _gh-governance-mhn-report-level → info (doplněna / změna domain projektu)
+  # nebo warning `rucne zmenena MHN property`. Při adopci položky nepřidává –
+  # rozdíly vypíše přes nameref jako doplněk detailu položky `adopce repa`.
+  # MHN na SHA ukazatele se čte jen je-li třeba; selhání čtení = konvergence
+  # (info), nikdy ne chyba běhu.
+  # Použití: _gh-governance-reconcile-properties-report <repo_path> <projectKey> <mhn_observed> <mhn_expected> <dt_observed> <pointer_sha> <adopted> <adoption_detail_name>
+  local _repo_path="$1" _key="$2" _mhn="$3" _expected="$4" _dt="$5"
+  local _pointer_sha="$6" _adopted="$7" _mhn_old _domain_old _level
+  declare -n _adoption_detail_ref="$8"
+  _adoption_detail_ref=""
+  if [[ "$_adopted" == true ]]; then
+    [[ "$_mhn" == "$_expected" ]] || \
+      _adoption_detail_ref="MHN property nastavena ('$_expected')"
+    [[ -n "$_dt" ]] || \
+      _adoption_detail_ref+="${_adoption_detail_ref:+; }Deployment_Target property doplněna ('$GH_DEPLOYMENT_TARGET_DEFAULT')"
+    return 0
+  fi
+  [[ -n "$_dt" ]] || _gh-governance-report-add info "opraveny drift" "$_repo_path" \
+    "Deployment_Target property doplněna ('$GH_DEPLOYMENT_TARGET_DEFAULT')"
+  _mhn_old="$_expected"
+  if [[ -n "$_mhn" && "$_mhn" != "$_expected" ]]; then
+    if _domain_old=$(_gh-governance-conf-domain-at-commit "$_pointer_sha" "$_key"); then
+      _mhn_old="${_domain_old%%/*}"
+    else
+      _mhn_old=""
+    fi
+  fi
+  _level=$(_gh-governance-mhn-report-level "$_mhn" "$_expected" "$_mhn_old" "$_adopted")
+  case "$_level" in
+    info-filled)
+      _gh-governance-report-add info "opraveny drift" "$_repo_path" \
+        "MHN property doplněna ('$_expected')" ;;
+    info-moved)
+      _gh-governance-report-add info "opraveny drift" "$_repo_path" \
+        "MHN property '$_mhn' → '$_expected' dle změny domain projektu" ;;
+    warning)
+      _gh-governance-report-add warning "rucne zmenena MHN property" "$_repo_path" \
+        "v GH bylo '$_mhn', nastaveno '$_expected' dle conf.d; příslušnost repa se mění jen v conf.d" ;;
+  esac
+  return 0
+}
+
 _gh-governance-reconcile-repo() {
   # Reconciliace jednoho spravovaného nearchivovaného repa: check před
-  # (detail driftu do reportu) → warningy „tým/ruleset přiřazený navíc" →
-  # idempotentní aplikace policy → odebrání týmů dle diffu ukazatele →
-  # zápis ukazatele do checkoutu (commit+push dělá běh jednou na konci).
+  # (detail driftu do reportu) + stav před aplikací (ukazatel, property) →
+  # idempotentní aplikace policy → odebrání týmů a Jenkins loginu dle diffu
+  # ukazatele → zápis ukazatele do checkoutu (commit+push dělá běh jednou na
+  # konci) → warningy „tým/ruleset/collaborator přiřazený navíc" → položky
+  # reportu (adopce, opravený drift, ruční změna MHN).
   # rc != 0 → volající reportuje „neuspesna reconciliace repa" a pokračuje.
   # Použití: _gh-governance-reconcile-repo <repoName> <branch> <projectKey>
   local _name="$1" _branch="$2" _key="$3"
   local _repo_path="${GITHUB_ORG}/${_name}" _result="" _detail="" _adopted=false
-  local _expected _observed _listing _team _permission _id _rsname
+  local _expected _observed _listing _team _permission _id _rsname _login _role
+  local _expected_mhn _mhn_observed="" _dt_observed="" _pointer_sha="" _adoption_props=""
+  local _removed_login=""
   local -a _removed=()
   local -A _expected_map=()
 
@@ -101,9 +170,14 @@ _gh-governance-reconcile-repo() {
     echo "Chyba: Policy check repa '$_repo_path' selhal ($_detail)." >&2
     return 1
   fi
+  # Stav před aplikací – rozlišení ruční změny MHN od konvergence: ukazatel
+  # (jen soubor) a pozorované property (čtení navíc k policy checku, 1 GET).
+  _expected_mhn=$(_gh-repository-policy-properties-expected-mhn "$_key") || return 1
+  _gh-repository-policy-properties-read "$_repo_path" _mhn_observed _dt_observed || return 1
+  _pointer_sha=$(_gh-governance-state-read "$_name" 2>/dev/null) || _pointer_sha=""
 
   _gh-governance-apply-policy-and-state "$_repo_path" "$_name" "$_branch" "$_key" \
-    _removed _adopted || return 1
+    _removed _adopted _removed_login || return 1
 
   # Warningy se zjišťují až po aplikaci a odebrání – popisují stav na konci
   # běhu (tým odebraný tímto během dle diffu není „přiřazený navíc").
@@ -130,16 +204,35 @@ _gh-governance-reconcile-repo() {
       _gh-governance-report-add warning "ruleset prirazeny navic" "$_repo_path" "ruleset '$_rsname'"
   done <<< "$_listing"
 
+  # Warning: collaborator přiřazený navíc (přímý collaborator mimo governance
+  # bota a Jenkins login aktuální domény; neodebírá se – úklid na vyžádání
+  # tools/remove-extra-collaborators.sh). Jenkins login staré domény odebral
+  # tento běh dle diffu ukazatele výše, takže se tu už neobjeví.
+  _listing=$(_gh-repository-policy-extra-collaborators-list "$_repo_path" "$_key") || return 1
+  while IFS=$'\t' read -r _login _role; do
+    [[ -n "$_login" ]] && _gh-governance-report-add warning "collaborator prirazeny navic" \
+      "$_repo_path" "collaborator '$_login' ($_role)"
+  done <<< "$_listing"
+
+  _gh-governance-reconcile-properties-report "$_repo_path" "$_key" "$_mhn_observed" \
+    "$_expected_mhn" "$_dt_observed" "$_pointer_sha" "$_adopted" _adoption_props
   if [[ "$_adopted" == true ]]; then
     _gh-governance-report-add info "adopce repa" "$_repo_path" \
-      "ukazatel založen; zjištěné rozdíly: ${_detail:--}"
+      "ukazatel založen; zjištěné rozdíly: ${_detail:--}${_adoption_props:+; $_adoption_props}"
   elif [[ "$_result" == DIFF ]]; then
-    _gh-governance-report-add info "opraveny drift" "$_repo_path" "$_detail"
+    # Rozdíl v property hlásí specifická položka výše; generické info zůstává
+    # pro ostatní detaily (policy check hlásí první rozdíl v pořadí checků).
+    case "$_detail" in
+      "MHN property differs"|"Deployment_Target property missing") ;;
+      *) _gh-governance-report-add info "opraveny drift" "$_repo_path" "$_detail" ;;
+    esac
   fi
   for _team in "${_removed[@]}"; do
     _gh-governance-report-add info "opraveny drift" "$_repo_path" \
       "odebrán tým '$_team' dle diffu konfigurace"
   done
+  [[ -n "$_removed_login" ]] && _gh-governance-report-add info "opraveny drift" "$_repo_path" \
+    "odebrán Jenkins collaborator '$_removed_login' dle diffu konfigurace"
   return 0
 }
 

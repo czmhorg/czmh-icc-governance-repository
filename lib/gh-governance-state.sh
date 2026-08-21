@@ -8,7 +8,7 @@
 # checkoutem gov repa (kořen = rodič adresáře conf.d, viz _GH_COMMON_CONF_D).
 # Závislosti: gh-common-defs.sh (_GH_COMMON_CONF_D, _GH_CONF, _require_vars),
 # lib/gh-conf.sh (_gh-conf-parse-file), lib/gh-repository-policy.sh
-# (_gh-validate-admin-team, _gh-jenkins-delete,
+# (_gh-validate-admin-team, _gh-jenkins-delete, _gh-jenkins-policy-resolve,
 #  _gh-repository-policy-live-admin-removal-safe).
 [[ -n "${_GH_GOVERNANCE_STATE_LOADED:-}" ]] && \
   declare -F _gh-governance-state-read >/dev/null && return 0
@@ -36,7 +36,7 @@ _gh-governance-run-sha() {
   if [[ -z "${_GH_GOVERNANCE_RUN_SHA:-}" ]]; then
     _root=$(_gh-governance-checkout-root) || return 1
     _sha=$(git -C "$_root" rev-parse HEAD 2>/dev/null)
-    if [[ ! "$_sha" =~ $_GH_GOVERNANCE_SHA_REGEX ]]; then
+    if ! _gh-match "$_sha" "$_GH_GOVERNANCE_SHA_REGEX"; then
       echo "Chyba: Nepodařilo se zjistit SHA HEAD checkoutu gov repa ('$_sha')." >&2
       return 1
     fi
@@ -55,7 +55,7 @@ _gh-governance-state-read() {
   [[ -f "$_file" ]] || return 1
   IFS= read -r _sha < "$_file" || true
   _sha="${_sha%$'\r'}"
-  if [[ ! "$_sha" =~ $_GH_GOVERNANCE_SHA_REGEX ]]; then
+  if ! _gh-match "$_sha" "$_GH_GOVERNANCE_SHA_REGEX"; then
     echo "Chyba: state/$_repo_name neobsahuje validní SHA commitu (je '$_sha')." >&2
     return 2
   fi
@@ -67,7 +67,7 @@ _gh-governance-state-write() {
   # kopie; commit+push provádí _gh-governance-state-push jednou na konci běhu).
   # Použití: _gh-governance-state-write <ghRepoName> <sha>
   local _repo_name="$1" _sha="$2" _root
-  if [[ ! "$_sha" =~ $_GH_GOVERNANCE_SHA_REGEX ]]; then
+  if ! _gh-match "$_sha" "$_GH_GOVERNANCE_SHA_REGEX"; then
     echo "Chyba: Ukazatel pro '$_repo_name' musí být plné SHA commitu (je '$_sha')." >&2
     return 1
   fi
@@ -134,32 +134,107 @@ _gh-governance-state-remove() {
   rm -f "$_root/state/$_repo_name"
 }
 
-_gh-governance-conf-teams-at-commit() {
-  # Naplní nameref pole slugy týmů z klíče repository_teams projektu ve verzi
-  # konfigurace daného commitu gov repa. Starou verzi čte přes `git show` a
-  # parsuje reuse _gh-conf-parse-file (žádný druhý parser); data ukládá do
-  # _GH_CONF pod izolovaný namespace "at-<sha>". Soubor v dané verzi nemusí
-  # existovat → prázdný seznam (rc 0).
-  # rc: 0 = OK, 1 = chyba (git/parsování) – volající nesmí nic odebírat.
-  # Použití: local -a _t=(); _gh-governance-conf-teams-at-commit <sha> <projectKey> _t
-  local _sha="$1" _key="$2" _root _content _tmp _k _rest _item
-  declare -n _teams_ref="$3"
+_gh-governance-conf-file-at-commit() {
+  # Načte jeden soubor conf.d ve verzi daného commitu gov repa do _GH_CONF pod
+  # izolovaný namespace "at-<sha>" (klíče at-<sha>/<název>/<pole>). Starou
+  # verzi čte přes `git show` a parsuje reuse _gh-conf-parse-file (žádný
+  # druhý parser); dřívější klíče téhož názvu v namespace nejdřív smaže.
+  # rc: 0 = načteno, 1 = soubor v té verzi neexistuje, 2 = chyba (git/parsování).
+  # Použití: _gh-governance-conf-file-at-commit <sha> <cesta pod conf.d> <název>
+  local _sha="$1" _rel="$2" _name="$3" _root _content _tmp _k
   local -a _errs=()
-  _teams_ref=()
-  _root=$(_gh-governance-checkout-root) || return 1
-  _content=$(git -C "$_root" show "$_sha:conf.d/projects/$_key.conf" 2>/dev/null) || return 0
-  _tmp=$(mktemp) || return 1
+  _root=$(_gh-governance-checkout-root) || return 2
+  _content=$(git -C "$_root" show "$_sha:conf.d/$_rel" 2>/dev/null) || return 1
+  _tmp=$(mktemp) || return 2
   printf '%s\n' "$_content" > "$_tmp"
   for _k in "${!_GH_CONF[@]}"; do
-    [[ "$_k" == "at-$_sha/$_key/"* ]] && unset "_GH_CONF[$_k]"
+    [[ "$_k" == "at-$_sha/$_name/"* ]] && unset "_GH_CONF[$_k]"
   done
-  _gh-conf-parse-file "$_tmp" "projects/$_key.conf@$_sha" "at-$_sha" "$_key" _errs
+  _gh-conf-parse-file "$_tmp" "$_rel@$_sha" "at-$_sha" "$_name" _errs
   rm -f "$_tmp"
   if [[ ${#_errs[@]} -gt 0 ]]; then
     printf '%s\n' "${_errs[@]}" >&2
-    echo "Chyba: Konfiguraci projects/$_key.conf ve verzi $_sha nelze naparsovat." >&2
-    return 1
+    echo "Chyba: Konfiguraci $_rel ve verzi $_sha nelze naparsovat." >&2
+    return 2
   fi
+  return 0
+}
+
+_gh-governance-conf-project-at-commit() {
+  # Načte projects/<projectKey>.conf ve verzi commitu (klíče
+  # at-<sha>/<projectKey>/<pole>). rc 0 = načteno, 1 = soubor v té verzi
+  # neexistuje, 2 = chyba.
+  # Použití: _gh-governance-conf-project-at-commit <sha> <projectKey>
+  _gh-governance-conf-file-at-commit "$1" "projects/$2.conf" "$2"
+}
+
+_gh-governance-conf-domain-at-commit() {
+  # Vypíše klíč domain projektu ve verzi commitu (prázdné = projekt v té
+  # verzi neexistoval). rc 0 = OK, 2 = chyba (git/parsování).
+  # Použití: _gh-governance-conf-domain-at-commit <sha> <projectKey>
+  local _sha="$1" _key="$2"
+  _gh-governance-conf-project-at-commit "$_sha" "$_key"
+  case $? in
+    0) printf '%s\n' "${_GH_CONF[at-$_sha/$_key/domain]:-}" ;;
+    1) ;;
+    *) return 2 ;;
+  esac
+  return 0
+}
+
+_gh-governance-conf-jenkins-at-commit() {
+  # Vypíše jenkins_user domény projektu ve verzi commitu (prázdné = projekt
+  # nebo doména v té verzi neexistovaly, nebo doména login nemá).
+  # rc 0 = OK, 2 = chyba (git/parsování).
+  # Použití: _gh-governance-conf-jenkins-at-commit <sha> <projectKey>
+  local _sha="$1" _key="$2" _domain
+  _domain=$(_gh-governance-conf-domain-at-commit "$_sha" "$_key") || return 2
+  [[ -n "$_domain" ]] || return 0
+  _gh-governance-conf-file-at-commit "$_sha" "domains/$_domain.conf" "domains/$_domain"
+  case $? in
+    0) printf '%s\n' "${_GH_CONF[at-$_sha/domains/$_domain/jenkins_user]:-}" ;;
+    1) ;;
+    *) return 2 ;;
+  esac
+  return 0
+}
+
+_gh-governance-jenkins-to-remove() {
+  # Naplní nameref Jenkins loginem k odebrání: login domény projektu na SHA
+  # ukazatele, pokud se liší od loginu na RUN_SHA (přesun projektu do jiné
+  # domény i výměna jenkins_user v téže doméně). Pojistky: nikdy login
+  # aktuální domény projektu (_GH_CONF) ani governance bota. Porovnání
+  # case-insensitive (GitHub loginy). rc 1 = chyba – volající nesmí odebírat.
+  # Použití: local _l; _gh-governance-jenkins-to-remove <projectKey> <pointer_sha> <run_sha> _l
+  local _key="$1" _old_sha="$2" _new_sha="$3" _old _new _current _configured _decision
+  declare -n _rm_login_ref="$4"
+  _rm_login_ref=""
+  _old=$(_gh-governance-conf-jenkins-at-commit "$_old_sha" "$_key") || return 1
+  _new=$(_gh-governance-conf-jenkins-at-commit "$_new_sha" "$_key") || return 1
+  [[ -n "$_old" ]] || return 0
+  [[ "${_old,,}" != "${_new,,}" ]] || return 0
+  _gh-jenkins-policy-resolve "$_key" _current _configured _decision || return 1
+  [[ "${_old,,}" != "${_current,,}" ]] || return 0
+  [[ "${_old,,}" != "${GH_GOVERNANCE_BOT_USER,,}" ]] || return 0
+  _rm_login_ref="$_old"
+  return 0
+}
+
+_gh-governance-conf-teams-at-commit() {
+  # Naplní nameref pole slugy týmů z klíče repository_teams projektu ve verzi
+  # konfigurace daného commitu gov repa (_gh-governance-conf-project-at-commit).
+  # Soubor v dané verzi nemusí existovat → prázdný seznam (rc 0).
+  # rc: 0 = OK, 1 = chyba (git/parsování) – volající nesmí nic odebírat.
+  # Použití: local -a _t=(); _gh-governance-conf-teams-at-commit <sha> <projectKey> _t
+  local _sha="$1" _key="$2" _rest _item
+  declare -n _teams_ref="$3"
+  _teams_ref=()
+  _gh-governance-conf-project-at-commit "$_sha" "$_key"
+  case $? in
+    0) ;;
+    1) return 0 ;;
+    *) return 1 ;;
+  esac
   _rest="${_GH_CONF[at-$_sha/$_key/repository_teams]:-},"
   while [[ "$_rest" == *,* ]]; do
     _item="${_rest%%,*}"
