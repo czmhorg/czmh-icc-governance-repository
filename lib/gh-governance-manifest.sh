@@ -46,7 +46,7 @@ _gh-governance-manifest-write-atomic() {
   # (klíč, název) – deterministický výstup minimalizuje rebase konflikty.
   # LC_ALL=C: řazení po bajtech nezávisle na locale stroje – jinak by
   # zapisovatelé s různými locale soubor přeuspořádávali
-  # (docs/locale-rozsahy-regex-validace.md).
+  # (docs/bash/locale-rozsahy-regex-validace.md).
   # Použití: ... | _gh-governance-manifest-write-atomic
   local _file _tmp
   _file=$(_gh-governance-manifest-file) || return 1

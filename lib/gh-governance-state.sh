@@ -199,25 +199,35 @@ _gh-governance-conf-jenkins-at-commit() {
   return 0
 }
 
-_gh-governance-jenkins-to-remove() {
-  # Naplní nameref Jenkins loginem k odebrání: login domény projektu na SHA
-  # ukazatele, pokud se liší od loginu na RUN_SHA (přesun projektu do jiné
-  # domény i výměna jenkins_user v téže doméně). Pojistky: nikdy login
-  # aktuální domény projektu (_GH_CONF) ani governance bota. Porovnání
+_gh-governance-jenkins-to-remove-between() {
+  # Naplní nameref Jenkins loginem k odebrání: login domény projektu oldKey
+  # na SHA old_sha, pokud se liší od loginu domény projektu newKey na SHA
+  # new_sha. Jednoklíčové volání (oldKey == newKey) pokrývá přesun projektu
+  # do jiné domény i výměnu jenkins_user; dvouklíčové přesun repa mezi
+  # projekty (move-repository). Pojistky: nikdy login aktuální domény
+  # projektu newKey (_GH_CONF) ani governance bota. Porovnání
   # case-insensitive (GitHub loginy). rc 1 = chyba – volající nesmí odebírat.
-  # Použití: local _l; _gh-governance-jenkins-to-remove <projectKey> <pointer_sha> <run_sha> _l
-  local _key="$1" _old_sha="$2" _new_sha="$3" _old _new _current _configured _decision
-  declare -n _rm_login_ref="$4"
+  # Použití: local _l; _gh-governance-jenkins-to-remove-between <oldKey> <old_sha> <newKey> <new_sha> _l
+  local _old_key="$1" _old_sha="$2" _new_key="$3" _new_sha="$4"
+  local _old _new _current _configured _decision
+  declare -n _rm_login_ref="$5"
   _rm_login_ref=""
-  _old=$(_gh-governance-conf-jenkins-at-commit "$_old_sha" "$_key") || return 1
-  _new=$(_gh-governance-conf-jenkins-at-commit "$_new_sha" "$_key") || return 1
+  _old=$(_gh-governance-conf-jenkins-at-commit "$_old_sha" "$_old_key") || return 1
+  _new=$(_gh-governance-conf-jenkins-at-commit "$_new_sha" "$_new_key") || return 1
   [[ -n "$_old" ]] || return 0
   [[ "${_old,,}" != "${_new,,}" ]] || return 0
-  _gh-jenkins-policy-resolve "$_key" _current _configured _decision || return 1
+  _gh-jenkins-policy-resolve "$_new_key" _current _configured _decision || return 1
   [[ "${_old,,}" != "${_current,,}" ]] || return 0
   [[ "${_old,,}" != "${GH_GOVERNANCE_BOT_USER,,}" ]] || return 0
   _rm_login_ref="$_old"
   return 0
+}
+
+_gh-governance-jenkins-to-remove() {
+  # Jednoklíčová zkratka _gh-governance-jenkins-to-remove-between (diff
+  # ukazatel→RUN_SHA v rámci téhož projektu).
+  # Použití: local _l; _gh-governance-jenkins-to-remove <projectKey> <pointer_sha> <run_sha> _l
+  _gh-governance-jenkins-to-remove-between "$1" "$2" "$1" "$3" "$4"
 }
 
 _gh-governance-conf-teams-at-commit() {
@@ -244,19 +254,23 @@ _gh-governance-conf-teams-at-commit() {
   return 0
 }
 
-_gh-governance-teams-to-remove() {
-  # Naplní nameref pole týmy k odebrání: {týmy v repository_teams na SHA
-  # ukazatele} − {týmy na RUN_SHA}. Pojistka: tým z aktuálně načteného
-  # repository_teams (_GH_CONF) se do seznamu nikdy nedostane.
-  # Použití: local -a _rm=(); _gh-governance-teams-to-remove <projectKey> <pointer_sha> <run_sha> _rm
-  local _key="$1" _old_sha="$2" _new_sha="$3" _team _new_csv _current
-  declare -n _rm_ref="$4"
+_gh-governance-teams-to-remove-between() {
+  # Naplní nameref pole týmy k odebrání: {týmy v repository_teams projektu
+  # oldKey na SHA old_sha} − {týmy projektu newKey na SHA new_sha}.
+  # Jednoklíčové volání (oldKey == newKey) je diff ukazatel→RUN_SHA v rámci
+  # projektu; dvouklíčové přesun repa mezi projekty (move-repository).
+  # Pojistka: tým z aktuálně načteného repository_teams projektu newKey
+  # (_GH_CONF) se do seznamu nikdy nedostane.
+  # Použití: local -a _rm=(); _gh-governance-teams-to-remove-between <oldKey> <old_sha> <newKey> <new_sha> _rm
+  local _old_key="$1" _old_sha="$2" _new_key="$3" _new_sha="$4"
+  local _team _new_csv _current
+  declare -n _rm_ref="$5"
   local -a _old_teams=() _new_teams=()
   _rm_ref=()
-  _gh-governance-conf-teams-at-commit "$_old_sha" "$_key" _old_teams || return 1
-  _gh-governance-conf-teams-at-commit "$_new_sha" "$_key" _new_teams || return 1
+  _gh-governance-conf-teams-at-commit "$_old_sha" "$_old_key" _old_teams || return 1
+  _gh-governance-conf-teams-at-commit "$_new_sha" "$_new_key" _new_teams || return 1
   _new_csv=",$(IFS=,; echo "${_new_teams[*]-}"),"
-  _current=",${_GH_CONF[projects/$_key/repository_teams]:-},"
+  _current=",${_GH_CONF[projects/$_new_key/repository_teams]:-},"
   for _team in "${_old_teams[@]}"; do
     # ghOrgSecurityManagersTeam se nikdy neodebírá (implicitní součást politiky;
     # v historické konfiguraci se mohl vyskytnout před zákazem v repository_teams).
@@ -266,6 +280,13 @@ _gh-governance-teams-to-remove() {
     _rm_ref+=("$_team")
   done
   return 0
+}
+
+_gh-governance-teams-to-remove() {
+  # Jednoklíčová zkratka _gh-governance-teams-to-remove-between (diff
+  # ukazatel→RUN_SHA v rámci téhož projektu).
+  # Použití: local -a _rm=(); _gh-governance-teams-to-remove <projectKey> <pointer_sha> <run_sha> _rm
+  _gh-governance-teams-to-remove-between "$1" "$2" "$1" "$3" "$4"
 }
 
 _gh-governance-teams-remove() {

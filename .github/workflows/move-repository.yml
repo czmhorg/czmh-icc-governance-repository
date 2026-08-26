@@ -1,0 +1,68 @@
+# GENEROVANO gov-sync.sh -- needitovat v gov repu
+# Workflow move-repository: issue s labelem move-repo → přesun spravovaného
+# repa mezi projekty řízeným přejmenováním (docs/navrh/rozdeleni-projektu.md).
+# Bezpečnostní schéma shodné s new-repository.yml: parse job čte event
+# soubor (tělo issue se nikdy neinterpoluje do run:), execute dostává
+# zvalidované hodnoty přes env. Concurrency zamyká staré jméno repa (entitu,
+# kterou workflow mění); závod o nové jméno kryje validace volnosti a
+# viditelné selhání rename API.
+name: move-repository
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  parse:
+    if: contains(github.event.issue.labels.*.name, 'move-repo')
+    runs-on: ubuntu-latest
+    environment: bot
+    outputs:
+      result: ${{ steps.parse.outputs.result }}
+      issue_number: ${{ steps.parse.outputs.issue_number }}
+      project_key: ${{ steps.parse.outputs.project_key }}
+      gh_name: ${{ steps.parse.outputs.gh_name }}
+      repo_name: ${{ steps.parse.outputs.repo_name }}
+      new_project_key: ${{ steps.parse.outputs.new_project_key }}
+      new_repo_name: ${{ steps.parse.outputs.new_repo_name }}
+      redirect: ${{ steps.parse.outputs.redirect }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Parse a autorizace issue
+        id: parse
+        env:
+          GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+          GH_ENTERPRISE_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+        run: bash bin/gov-move-repository.sh --parse
+
+  execute:
+    needs: parse
+    if: needs.parse.outputs.result == 'ok'
+    runs-on: ubuntu-latest
+    environment: bot
+    concurrency:
+      group: repo-${{ needs.parse.outputs.repo_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GOV_BOT_TOKEN }}
+      - name: Identita bota pro commity /state/
+        run: |
+          git config user.name "governance-bot"
+          git config user.email "governance-bot@users.noreply.github.com"
+      - name: Přesun repa
+        env:
+          GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+          GH_ENTERPRISE_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+          PROJECT_KEY: ${{ needs.parse.outputs.project_key }}
+          GH_NAME: ${{ needs.parse.outputs.gh_name }}
+          NEW_PROJECT_KEY: ${{ needs.parse.outputs.new_project_key }}
+          REDIRECT: ${{ needs.parse.outputs.redirect }}
+          ISSUE_NUMBER: ${{ needs.parse.outputs.issue_number }}
+        run: bash bin/gov-move-repository.sh --execute "$PROJECT_KEY" "$GH_NAME" "$NEW_PROJECT_KEY" "$REDIRECT" "$ISSUE_NUMBER"

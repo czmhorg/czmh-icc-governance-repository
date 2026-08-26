@@ -82,12 +82,17 @@ _GH_COMMON_DEFS_LOADED=1
 # Formát ghName (defs/defs.md); ghRepoName = <prefix>-<projectKey>-<ghName>,
 # max 100 znaků. Sdílí klientské funkce (gh-new, …) i governance moduly.
 _GH_GHNAME_REGEX='^[a-z0-9][a-z0-9._-]*$'
+# Formát ghProjectKey (defs/defs.md): bez pomlčky — v ghRepoName odděluje
+# projectKey a ghName první pomlčka za prefixem (_gh-repo-resolve). Délku
+# (max 46) hlídá governance vrstva (_GH_GOVERNANCE_PROJECT_KEY_REGEX).
+_GH_PROJECT_KEY_REGEX='^[a-z0-9]+$'
 
-# Kořenový adresář pro lokální kopié repozitářů.
-# Pokud je nastavena, workspace-aware funkce (gh-clone, gh-cd, gh-open, gh-sync, gh-status)
-# ukládají a pracují s repozitáři ve struktuře ${GH_WORKSPACE_ROOT}/{projectKey}/{repoName}.
+# Kořenový adresář lokálních kopií repozitářů (workspace). Workspace funkce
+# (gh-clone, gh-cd, gh-open, gh-project-clone, gh-sync, gh-status) pracují
+# se strukturou ${GH_WORKSPACE_ROOT}/{projectKey}/{ghName}. Výchozí hodnota
+# platí bez jakékoli lokální konfigurace; přepsání v gh-common-defs.local.sh.
 # Nezapomeň: používej ${HOME}/..., ne ~/... (tilda se neexpanduje ve všech kontextech).
-# GH_WORKSPACE_ROOT="${HOME}/workspace"
+: "${GH_WORKSPACE_ROOT:=${HOME}/github/workspace}"
 
 # Editor pro gh-open (bez --web). Výchozí: code (VS Code).
 # GH_EDITOR=code
@@ -103,7 +108,7 @@ _GH_GHNAME_REGEX='^[a-z0-9][a-z0-9._-]*$'
 : "${GH_GOVERNANCE_TRACK_DELETE_INTERVAL_S:=30}"
 
 # Maximální stáří snapshotu completion cache v minutách před background
-# refreshem (viz gh-completion-cache-design.md).
+# refreshem (viz docs/implementovano/navrh/gh-completion-cache-design.md).
 : "${GH_COMPLETION_CACHE_TTL_MIN:=15}"
 
 # Minimální odstup pokusů o refresh completion cache v minutách
@@ -126,6 +131,12 @@ _GH_GHNAME_REGEX='^[a-z0-9][a-z0-9._-]*$'
 # projektu najednou se do ní nemusí vejít, proto se hledání dávkuje.
 : "${GH_SEARCH_REF_BATCH:=150}"
 
+# Pager pro výstup gh-search, když je stdout terminál (v rouře/přesměrování se
+# nepoužije nikdy). Prázdná hodnota = bez stránkování; jednorázově vypne volba
+# --no-pager. Bez dvojtečky v ${...=} záměrně: nastavená prázdná hodnota se
+# respektuje jako vypnuto, := by ji přepsalo defaultem.
+: "${GH_SEARCH_PAGER=${PAGER:-less -RFX}}"
+
 # Kořen pracovních rep funkcí (docs/implementovano/pracovni-repa-funkci.md): trvalé
 # klony (gov repo, řídicí repa migrace), se kterými pracují výhradně funkce.
 # Není to cache — obsah se commituje a pushuje; nesmí ho mazat čisticí nástroje.
@@ -133,7 +144,7 @@ _GH_GHNAME_REGEX='^[a-z0-9][a-z0-9._-]*$'
 : "${GH_WORK_REPOS_ROOT:=${HOME}/.local/state/gh-work}"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Locale-nezávislé regex validace (docs/locale-rozsahy-regex-validace.md).
+# Locale-nezávislé regex validace (docs/bash/locale-rozsahy-regex-validace.md).
 # Definováno před sourcováním lib/ modulů níže — _gh-conf-load validuje
 # už při načítání shellu.
 # ══════════════════════════════════════════════════════════════════════════════
@@ -154,7 +165,8 @@ _gh-match() {
 # ══════════════════════════════════════════════════════════════════════════════
 # Lokální uživatelské přepsání (gitignorováno).
 # Zkopíruj gh-common-defs.local.sh.example → gh-common-defs.local.sh
-# a nastav GH_WORKSPACE_ROOT, GH_EDITOR a případně další proměnné.
+# a přepiš proměnné, jejichž výchozí hodnota nevyhovuje (GH_WORKSPACE_ROOT,
+# GH_EDITOR, …).
 # ══════════════════════════════════════════════════════════════════════════════
 _GH_COMMON_DIR="$(dirname "${BASH_SOURCE[0]}")"
 _GH_COMMON_LOCAL="$_GH_COMMON_DIR/gh-common-defs.local.sh"
@@ -387,6 +399,137 @@ _gh-workspace-dirs() {
   return 0
 }
 
+_gh-repo-resolve() {
+  # Jednotná identifikace repa v parametrech funkcí
+  # (docs/implementovano/navrh/identifikace-repa-parametry.md): převede
+  # poziční argumenty volající funkce v libovolném z tvarů
+  #   <projectKey> <ghName> | <ghRepoName> | <org>/<ghRepoName> | URL (https, git@)
+  # na ghProjectKey + ghName. Nameref asoc. pole dostane klíče projectKey,
+  # ghName, repoName (<GH_REPO_PREFIX>-<projectKey>-<ghName>) a consumed —
+  # počet spotřebovaných pozičních argumentů (2 u krátkého tvaru, jinak 1);
+  # zbytek si bere volající (cílový adresář gh-clone). Funkce bez dalších
+  # pozičních parametrů volají _gh-repo-resolve-exact.
+  # Čistě řetězcové (bez sítě a conf.d). Pracuje jen se spravovanými repy:
+  # cizí host, cizí org, název bez prefixu nebo s legacy prefixem = chyba
+  # „repo není spravované“ (legacy název resolver záměrně nezná — složil by
+  # z něj jiné repo). Z URL bere první dva segmenty cesty (org/repo), ořízne
+  # .git i userinfo (token@host u klonů gh-clone); /tree/…, /pull/… a koncové
+  # lomítko zahodí. Host a org porovnává bez ohledu na velikost písmen.
+  # Formáty projectKey a ghName (defs/defs.md) validuje u všech tvarů.
+  # Použití: local -A _rr=(); _gh-repo-resolve _rr "${_pos[@]}" || return 1
+  declare -n _grr_ref="$1"
+  local _a1="${2:-}" _a2="${3:-}"
+  local _host="" _org="" _name="" _rest="" _key="" _gh_name="" _consumed=1 _what
+  _grr_ref=([projectKey]="" [ghName]="" [repoName]="" [consumed]=0)
+  _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX || return 1
+
+  if [[ -z "$_a1" ]]; then
+    echo "Chyba: Zadej repozitář: <projectKey> <ghName>, <ghRepoName>, <org>/<ghRepoName> nebo URL (viz gh-help)." >&2
+    return 1
+  fi
+  # Rozpoznání tvaru (BASH_REMATCH bez rozsahů písmen — docs/bash/locale-rozsahy-regex-validace.md).
+  if [[ "$_a1" =~ ^https?://([^/]+)/(.*)$ ]]; then
+    _host="${BASH_REMATCH[1]##*@}"
+    _rest="${BASH_REMATCH[2]}"
+  elif [[ "$_a1" =~ ^(ssh://)?git@([^:/]+)[:/](.*)$ ]]; then
+    _host="${BASH_REMATCH[2]}"
+    _rest="${BASH_REMATCH[3]}"
+  fi
+  if [[ -n "$_host" ]]; then
+    _org="${_rest%%/*}"
+    if [[ "$_rest" == */* ]]; then _rest="${_rest#*/}"; else _rest=""; fi
+    _name="${_rest%%/*}"
+    _name="${_name%.git}"
+    if [[ -z "$_org" || -z "$_name" ]]; then
+      echo "Chyba: URL neobsahuje org/repo: $_a1" >&2
+      return 1
+    fi
+  elif [[ "$_a1" == */* ]]; then
+    _org="${_a1%%/*}"
+    _name="${_a1#*/}"
+    if [[ -z "$_org" || -z "$_name" || "$_name" == */* ]]; then
+      echo "Chyba: Neplatný tvar <org>/<ghRepoName>: $_a1" >&2
+      return 1
+    fi
+  elif [[ "$_a1" == "${GH_REPO_PREFIX}-"* ]]; then
+    _org="$GITHUB_ORG"
+    _name="$_a1"
+  else
+    if [[ -z "$_a2" ]]; then
+      echo "Chyba: Zadej ghName jako druhý argument (<projectKey> <ghName>)." >&2
+      return 1
+    fi
+    _key="$_a1"
+    _gh_name="$_a2"
+    _consumed=2
+  fi
+
+  if [[ $_consumed -eq 1 ]]; then
+    # org/repo → spravované repo: náš host, naše org, <prefix>-<key>-<name>.
+    _what="${_org}/${_name}"
+    local _foreign_host=0
+    if [[ -n "$_host" && "${_host,,}" != "${GITHUB_ORG_HOSTNAME,,}" ]]; then
+      _foreign_host=1
+      _what+="@${_host}"
+    fi
+    _rest="${_name#"${GH_REPO_PREFIX}-"}"
+    _key="${_rest%%-*}"
+    _gh_name="${_rest#*-}"
+    if [[ $_foreign_host -eq 1 || "${_org,,}" != "${GITHUB_ORG,,}" \
+          || "$_name" != "${GH_REPO_PREFIX}-"* || "$_rest" != *-* \
+          || -z "$_key" || -z "$_gh_name" ]]; then
+      echo "Chyba: repo není spravované (${GH_REPO_PREFIX}-<ghProjectKey>-<ghName> v ${GITHUB_ORG}): ${_what}" >&2
+      return 1
+    fi
+  fi
+
+  if ! _gh-match "$_key" "$_GH_PROJECT_KEY_REGEX"; then
+    echo "Chyba: projectKey '$_key' neodpovídá formátu $_GH_PROJECT_KEY_REGEX (viz defs/defs.md)." >&2
+    return 1
+  fi
+  if ! _gh-match "$_gh_name" "$_GH_GHNAME_REGEX"; then
+    echo "Chyba: ghName '$_gh_name' neodpovídá formátu $_GH_GHNAME_REGEX (viz defs/defs.md)." >&2
+    return 1
+  fi
+  _grr_ref[projectKey]="$_key"
+  _grr_ref[ghName]="$_gh_name"
+  _grr_ref[repoName]="${GH_REPO_PREFIX}-${_key}-${_gh_name}"
+  _grr_ref[consumed]=$_consumed
+  return 0
+}
+
+_gh-repo-resolve-exact() {
+  # _gh-repo-resolve pro funkce bez dalších pozičních parametrů: všechny
+  # poziční argumenty musí resolver spotřebovat (gh-open czmhorg/x navic = chyba).
+  # Použití: local -A _rr=(); _gh-repo-resolve-exact _rr "${_pos[@]}" || return 1
+  declare -n _grre_ref="$1"
+  _gh-repo-resolve "$@" || return 1
+  if [[ $(( $# - 1 )) -gt ${_grre_ref[consumed]} ]]; then
+    echo "Chyba: Příliš mnoho argumentů." >&2
+    return 1
+  fi
+  return 0
+}
+
+_gh-repo-resolve-or-project() {
+  # Varianta pro workspace funkce s volitelným repem (gh-open, gh-cd): jediný
+  # poziční argument bez '/' a bez prefixu <GH_REPO_PREFIX>- je projectKey
+  # (ghName a repoName zůstanou prázdné), cokoli jiného jde přes
+  # _gh-repo-resolve-exact.
+  # Použití: local -A _rr=(); _gh-repo-resolve-or-project _rr "${_pos[@]}" || return 1
+  declare -n _grrp_ref="$1"
+  if [[ $# -eq 2 && "$2" != */* && "$2" != "${GH_REPO_PREFIX}-"* ]]; then
+    _require_vars GH_REPO_PREFIX || return 1
+    if ! _gh-match "$2" "$_GH_PROJECT_KEY_REGEX"; then
+      echo "Chyba: projectKey '$2' neodpovídá formátu $_GH_PROJECT_KEY_REGEX (viz defs/defs.md)." >&2
+      return 1
+    fi
+    _grrp_ref=([projectKey]="$2" [ghName]="" [repoName]="" [consumed]=1)
+    return 0
+  fi
+  _gh-repo-resolve-exact "$@"
+}
+
 _gh-fmt-duration() {
   # Naplní nameref kompaktním zápisem doby: <1 s celé ms (215ms), do 60 s sekundy
   # s jedním desetinným místem (12.3s), do 1 h minuty a sekundy (1m2s), jinak hodiny
@@ -429,21 +572,32 @@ _bb-eta-print() {
     "$_count" "$_total" "$_rem_str" "$_avg_str" "$_slug"
 }
 
+_gh-utf8-pad() {
+  # Doplní UTF-8 řetězec mezerami zprava na <šířka> znaků do nameref proměnné —
+  # sloupce tabulek s diakritikou. printf '%-Ns' i ${#} mimo UTF-8 locale
+  # počítají bajty, každé písmeno s diakritikou by sloupec posunulo o jedna —
+  # délka se proto počítá nezávisle na locale: v subshellu s LC_ALL=C se
+  # z UTF-8 řetězce odstraní pokračovací bajty (0x80–0xBF) a zbylé bajty =
+  # znaky. Jeden fork na volání je přijatelný (desítky volání na běh).
+  # Řetězec delší než <šířka> se nedoplňuje (výplň 0) ani nezkracuje.
+  # Použití: _gh-utf8-pad <řetězec> <šířka> <nameref výsledku>
+  local _s="$1" _width="$2" _len _pad
+  declare -n _pad_ref="$3"
+  _len=$(LC_ALL=C; _t="${_s//[$'\x80'-$'\xbf']/}"; printf '%s' "${#_t}")
+  _pad=$(( _width - _len )); (( _pad > 0 )) || _pad=0
+  printf -v _pad_ref '%s%*s' "$_s" "$_pad" ''
+}
+
 _gh-summary-row() {
   # Řádek „<odsazení><popisek> <hodnota>" s hodnotami pod sebou (popisek
-  # doplněný mezerami na <šířka> znaků) — závěrečné souhrny toolů, detail repa
-  # v gh-info, stav migrace. printf '%-Ns' i ${#} mimo UTF-8 locale počítají
-  # bajty, každé písmeno s diakritikou by sloupec posunulo o jedna — délka
-  # popisku se proto počítá nezávisle na locale: v subshellu s LC_ALL=C se
-  # z UTF-8 řetězce odstraní pokračovací bajty (0x80–0xBF) a zbylé bajty =
-  # znaky. Jeden fork na řádek je přijatelný (jednotky řádků na běh).
+  # doplněný mezerami na <šířka> znaků přes _gh-utf8-pad) — závěrečné souhrny
+  # toolů, detail repa v gh-info, stav migrace.
   # Použití: _gh-summary-row <popisek> <hodnota> [<šířka>=30] [<odsazení>=2]
   # Popisek delší než <šířka> se nedoplňuje (výplň 0), hodnota následuje za
   # jednou mezerou.
-  local _label="$1" _value="$2" _width="${3:-30}" _indent="${4:-2}" _len _pad
-  _len=$(LC_ALL=C; _t="${_label//[$'\x80'-$'\xbf']/}"; printf '%s' "${#_t}")
-  _pad=$(( _width - _len )); (( _pad > 0 )) || _pad=0
-  printf '%*s%s%*s %s\n' "$_indent" '' "$_label" "$_pad" '' "$_value"
+  local _label="$1" _value="$2" _width="${3:-30}" _indent="${4:-2}" _padded
+  _gh-utf8-pad "$_label" "$_width" _padded
+  printf '%*s%s %s\n' "$_indent" '' "$_padded" "$_value"
 }
 
 _gh-project-exists() {

@@ -4,11 +4,12 @@
 # Bezpečný parser INI konfigurace conf.d/ (projects/, business-services/,
 # domains/, profiles/).
 # Načítá soubory klíč=hodnota do asociativního pole _GH_CONF bez sourcování.
-# Formát a pravidla: docs/implementovano/zadani-konverze-confd.md.
+# Formát a pravidla: docs/readme/README_COMMON.md (sekce Konfigurace projektů).
 # Běží při každém startu shellu (source z gh-common-defs.sh) – v load path
 # jsou povoleny pouze bash builtiny, žádné spouštění externích procesů.
-# Závislost: _gh-match z gh-common-defs.sh (sám je jen builtin [[ =~ ]]
-# s lokálním LC_ALL=C; definován před sourcováním tohoto modulu).
+# Závislosti z gh-common-defs.sh (definovány před sourcováním tohoto modulu):
+# _gh-match (sám je jen builtin [[ =~ ]] s lokálním LC_ALL=C) a konfigurační
+# proměnné GH_GOVERNANCE_REPO + GH_REPO_PREFIX (rezervovaný projectKey).
 [[ -n "${_GH_CONF_LOADED:-}" ]] && \
   declare -F _gh-conf-load >/dev/null && return 0
 _GH_CONF_LOADED=1
@@ -21,7 +22,9 @@ declare -ga _GH_CONF_PROJECT_KEYS=()
 # Pole profilu = branch protection API (názvy BRANCH_PROTECT_* malými bez prefixu).
 _GH_CONF_PROFILE_FIELDS="required_status_checks enforce_admins dismiss_stale_reviews require_code_owner_reviews required_approving_review_count restrictions allow_force_pushes allow_deletions required_linear_history"
 _GH_CONF_PROFILE_BOOL_FIELDS="enforce_admins dismiss_stale_reviews require_code_owner_reviews allow_force_pushes allow_deletions required_linear_history"
-_GH_CONF_PROJECT_FIELDS="domain rulesets repository_teams repository_creators repository_archivers"
+_GH_CONF_PROJECT_FIELDS="display_name domain rulesets repository_teams repository_creators repository_archivers"
+# Nepovinná pole projektu; přítomný klíč musí mít neprázdnou hodnotu.
+_GH_CONF_PROJECT_OPT_FIELDS="description"
 # Formát hodnoty klíče domain projektu: <MHN>/<typ> (odkaz na domains/<MHN>/<typ>.conf).
 _GH_CONF_DOMAIN_REF_REGEX='^[A-Z][A-Z0-9]*/[a-z][a-z0-9-]*$'
 # Pole profilu mimo branch protection API: cílení rulesetu (vzor větví pro
@@ -237,10 +240,15 @@ _gh-conf-validate-project() {
     [[ -n "${_GH_CONF[projects/$_pk/$_field]:-}" ]] || \
       _gh-conf-err "$2" "$_rel" "chybí povinný klíč '$_field' (nebo má prázdnou hodnotu)"
   done
+  for _field in $_GH_CONF_PROJECT_OPT_FIELDS; do
+    if [[ -v _GH_CONF["projects/$_pk/$_field"] && -z "${_GH_CONF[projects/$_pk/$_field]}" ]]; then
+      _gh-conf-err "$2" "$_rel" "klíč '$_field' má prázdnou hodnotu"
+    fi
+  done
   for _key in "${!_GH_CONF[@]}"; do
     [[ "$_key" == "projects/$_pk/"* ]] || continue
     _field="${_key##*/}"
-    [[ " $_GH_CONF_PROJECT_FIELDS " == *" $_field "* ]] || \
+    [[ " $_GH_CONF_PROJECT_FIELDS $_GH_CONF_PROJECT_OPT_FIELDS " == *" $_field "* ]] || \
       _gh-conf-err "$2" "$_rel" "neznámý klíč '$_field'"
   done
   _domain="${_GH_CONF[projects/$_pk/domain]:-}"
@@ -285,12 +293,31 @@ _gh-conf-validate-project() {
   fi
 }
 
+_gh-conf-reserved-project-key() {
+  # Naplní nameref rezervovaným ghProjectKey odvozeným z názvu gov repa:
+  # z GH_GOVERNANCE_REPO ustřihne prefix "<GH_REPO_PREFIX>-" a vezme první
+  # segment do další pomlčky — shodná derivace jako rozklad názvu repa
+  # v _gh-repo-resolve, projekt s tímto klíčem by proto byl od gov repa
+  # nerozlišitelný (defs/defs-governance-repo.md). Nemá-li název gov repa
+  # tvar <prefix>-<x>-<y>, kolize nemůže nastat a nameref zůstane prázdný.
+  # Použití: local _r; _gh-conf-reserved-project-key _r
+  declare -n _crpk_ref="$1"
+  local _rest
+  _crpk_ref=""
+  [[ -n "${GH_REPO_PREFIX:-}" && "${GH_GOVERNANCE_REPO:-}" == "${GH_REPO_PREFIX}-"* ]] \
+    || return 0
+  _rest="${GH_GOVERNANCE_REPO#"${GH_REPO_PREFIX}-"}"
+  [[ "$_rest" == *-* ]] || return 0
+  _crpk_ref="${_rest%%-*}"
+  return 0
+}
+
 _gh-conf-load() {
   # Načte a zvaliduje celou INI konfiguraci conf.d do _GH_CONF (bez source).
   # Sbírá všechny chyby najednou; při jakékoli chybě je vypíše na stderr,
   # vyprázdní data a vrátí 1. Úspěch značí _GH_CONF_DATA_LOADED=1.
   # Použití: _gh-conf-load <confd_root>
-  local _root="$1" _name
+  local _root="$1" _name _reserved
   local -a _errors=()
   local -A _profiles_seen=() _bs_seen=() _domains_seen=() _projects_seen=()
   _GH_CONF=()
@@ -309,7 +336,12 @@ _gh-conf-load() {
   for _name in "${!_domains_seen[@]}"; do
     _gh-conf-validate-domain "$_name" _errors _bs_seen
   done
+  _gh-conf-reserved-project-key _reserved
   for _name in "${_GH_CONF_PROJECT_KEYS[@]}"; do
+    if [[ -n "$_reserved" && "$_name" == "$_reserved" ]]; then
+      _gh-conf-err _errors "projects/$_name.conf" \
+        "projectKey '$_name' je rezervovaný — kolize s gov repem '$GH_GOVERNANCE_REPO'"
+    fi
     _gh-conf-validate-project "$_name" _errors _profiles_seen _domains_seen
   done
   [[ ${#_GH_CONF_PROJECT_KEYS[@]} -gt 0 ]] || \
