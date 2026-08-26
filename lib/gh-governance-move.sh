@@ -87,41 +87,44 @@ _gh-governance-move-detect() {
   # repo neodpovídá žádnému očekávanému stavu. rc 1 jen provozní chyba.
   # Použití: local _s; local -A _i=(); _gh-governance-move-detect <srcKey> <ghName> <dstKey> _s _i
   local _src="$1" _name="$2" _dst="$3" _old_name _new_name _ghp_count _ghp
-  declare -n _state_ref="$4" _info_ref="$5"
-  local -A _new_info=()
-  _state_ref=""
+  # Jména namerefů záměrně unikátní (_mvd_*): hodnota namerefu se předává dál
+  # do _gh-governance-repo-info a shoda se jménem jejího parametru (_info_ref)
+  # by byla cyklická reference.
+  declare -n _mvd_state_ref="$4" _mvd_info_ref="$5"
+  local -A _mvd_new_info=()
+  _mvd_state_ref=""
   _old_name=$(_gh-governance-repo-name "$_src" "$_name") || return 1
   _new_name=$(_gh-governance-repo-name "$_dst" "$_name") || return 1
-  _gh-governance-repo-info "${GITHUB_ORG}/${_old_name}" _info_ref || return 1
-  if [[ "${_info_ref[exists]}" == true ]]; then
+  _gh-governance-repo-info "${GITHUB_ORG}/${_old_name}" _mvd_info_ref || return 1
+  if [[ "${_mvd_info_ref[exists]}" == true ]]; then
     if ! _gh-governance-managed-verify "${GITHUB_ORG}/${_old_name}" "$_src" \
-        "${_info_ref[topics]}"; then
-      _state_ref=conflict
+        "${_mvd_info_ref[topics]}"; then
+      _mvd_state_ref=conflict
       return 0
     fi
-    _gh-governance-repo-info "${GITHUB_ORG}/${_new_name}" _new_info || return 1
-    if [[ "${_new_info[exists]}" == true ]]; then
+    _gh-governance-repo-info "${GITHUB_ORG}/${_new_name}" _mvd_new_info || return 1
+    if [[ "${_mvd_new_info[exists]}" == true ]]; then
       echo "Chyba: Nové jméno '${GITHUB_ORG}/${_new_name}' je už obsazené." >&2
-      _state_ref=taken
+      _mvd_state_ref=taken
       return 0
     fi
-    _state_ref=fresh
+    _mvd_state_ref=fresh
     return 0
   fi
-  _gh-governance-repo-info "${GITHUB_ORG}/${_new_name}" _info_ref || return 1
-  if [[ "${_info_ref[exists]}" != true ]]; then
+  _gh-governance-repo-info "${GITHUB_ORG}/${_new_name}" _mvd_info_ref || return 1
+  if [[ "${_mvd_info_ref[exists]}" != true ]]; then
     echo "Chyba: Repo '${GITHUB_ORG}/${_old_name}' ani '${GITHUB_ORG}/${_new_name}' neexistuje." >&2
-    _state_ref=missing
+    _mvd_state_ref=missing
     return 0
   fi
-  _gh-governance-ghp-topics "${_info_ref[topics]}" _ghp_count _ghp
+  _gh-governance-ghp-topics "${_mvd_info_ref[topics]}" _ghp_count _ghp
   if [[ $_ghp_count -eq 1 && "$_ghp" == "${GH_PROJECT_TOPIC_PREFIX}${_src}" ]]; then
-    _state_ref=half
+    _mvd_state_ref=half
   elif [[ $_ghp_count -eq 1 && "$_ghp" == "${GH_PROJECT_TOPIC_PREFIX}${_dst}" ]]; then
-    _state_ref=done
+    _mvd_state_ref=done
   else
-    echo "Chyba: Repo '${GITHUB_ORG}/${_new_name}' má neočekávané topicy ('${_info_ref[topics]}') – stav přesunu nelze určit." >&2
-    _state_ref=conflict
+    echo "Chyba: Repo '${GITHUB_ORG}/${_new_name}' má neočekávané topicy ('${_mvd_info_ref[topics]}') – stav přesunu nelze určit." >&2
+    _mvd_state_ref=conflict
   fi
   return 0
 }
