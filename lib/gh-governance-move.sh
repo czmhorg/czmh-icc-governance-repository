@@ -75,6 +75,25 @@ _gh-governance-move-capacity-ok() {
   return 0
 }
 
+_gh-governance-move-name-info() {
+  # Metadata JMÉNA (ne repa): _gh-governance-repo-info, ale rename redirect
+  # se nepovažuje za existenci – GET repos/{path} redirect následuje a vrátil
+  # by cizí (typicky právě přesunuté) repo. Vrací-li lookup jiné full_name
+  # než dotazovanou cestu, jméno je volné (exists=false) a skutečný cíl
+  # redirectu zůstává v klíči redirect_to.
+  # Použití: local -A _i=(); _gh-governance-move-name-info <repo_path> _i
+  local _repo_path="$1"
+  declare -n _mvn_info_ref="$2"
+  _gh-governance-repo-info "$_repo_path" _mvn_info_ref || return 1
+  _mvn_info_ref[redirect_to]=""
+  if [[ "${_mvn_info_ref[exists]}" == true \
+      && "${_mvn_info_ref[full_name],,}" != "${_repo_path,,}" ]]; then
+    _mvn_info_ref[redirect_to]="${_mvn_info_ref[full_name]}"
+    _mvn_info_ref[exists]=false
+  fi
+  return 0
+}
+
 _gh-governance-move-detect() {
   # Rozpozná stav přesunu repa a naplní namerefy: stav
   # (fresh|half|done|missing|taken|conflict) a metadata existujícího repa
@@ -95,14 +114,16 @@ _gh-governance-move-detect() {
   _mvd_state_ref=""
   _old_name=$(_gh-governance-repo-name "$_src" "$_name") || return 1
   _new_name=$(_gh-governance-repo-name "$_dst" "$_name") || return 1
-  _gh-governance-repo-info "${GITHUB_ORG}/${_old_name}" _mvd_info_ref || return 1
+  # Lookup jmen přes name-info: rename redirect starého jména na přesunuté
+  # repo se nesmí počítat jako existence (jinak by resume nikdy nenastal).
+  _gh-governance-move-name-info "${GITHUB_ORG}/${_old_name}" _mvd_info_ref || return 1
   if [[ "${_mvd_info_ref[exists]}" == true ]]; then
     if ! _gh-governance-managed-verify "${GITHUB_ORG}/${_old_name}" "$_src" \
         "${_mvd_info_ref[topics]}"; then
       _mvd_state_ref=conflict
       return 0
     fi
-    _gh-governance-repo-info "${GITHUB_ORG}/${_new_name}" _mvd_new_info || return 1
+    _gh-governance-move-name-info "${GITHUB_ORG}/${_new_name}" _mvd_new_info || return 1
     if [[ "${_mvd_new_info[exists]}" == true ]]; then
       echo "Chyba: Nové jméno '${GITHUB_ORG}/${_new_name}' je už obsazené." >&2
       _mvd_state_ref=taken
@@ -111,7 +132,7 @@ _gh-governance-move-detect() {
     _mvd_state_ref=fresh
     return 0
   fi
-  _gh-governance-repo-info "${GITHUB_ORG}/${_new_name}" _mvd_info_ref || return 1
+  _gh-governance-move-name-info "${GITHUB_ORG}/${_new_name}" _mvd_info_ref || return 1
   if [[ "${_mvd_info_ref[exists]}" != true ]]; then
     echo "Chyba: Repo '${GITHUB_ORG}/${_old_name}' ani '${GITHUB_ORG}/${_new_name}' neexistuje." >&2
     _mvd_state_ref=missing
@@ -216,21 +237,32 @@ _gh-governance-move-break-redirect() {
   # zaseknutou žádost zviditelní denní reconcile (divoké repo + zaseknuté
   # smazání). Selhání track-delete issue je jen varování (pojistkou je noční
   # reconcile sweep). Nameref naplní URL delete issue (pro komentář).
-  # Použití: local _u; _gh-governance-move-break-redirect <staréRepoName> <novéRepoName> _u
+  # Nameref result: broken (redirect zrušen teď), absent (redirect už
+  # neexistoval – nic k rušení), occupied (staré jméno nese skutečné repo –
+  # dočasné z minulého běhu, nebo cizí; nic se nezakládá).
+  # Použití: local _u _r; _gh-governance-move-break-redirect <staréRepoName> <novéRepoName> _u _r
   local _old_name="$1" _new_name="$2" _repo_path _issue_url _track_url
-  declare -n _delete_issue_ref="$3"
+  declare -n _delete_issue_ref="$3" _redirect_result_ref="$4"
   local -A _old_info=()
   _delete_issue_ref=""
+  _redirect_result_ref=""
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_DELETE_HELPER_REPO GH_GOVERNANCE_REPO GH_NEW_REPO_VISIBILITY || return 1
   _repo_path="${GITHUB_ORG}/${_old_name}"
-  # Idempotence (opakovaný běh): staré jméno už může být obsazené – dočasným
-  # repem z minulého pokusu čekajícím na smazání, nebo cizím repem. Nic
-  # nezakládat ani nemazat, jen ohlásit.
-  _gh-governance-repo-info "$_repo_path" _old_info || return 1
+  # Idempotence (opakovaný běh): GET repos/{staréJméno} následuje rename
+  # redirect – full_name rozliší skutečné repo (obsazeno) od redirectu
+  # (je co rušit) a 404 od už zrušeného redirectu (nic k rušení).
+  _gh-governance-move-name-info "$_repo_path" _old_info || return 1
   if [[ "${_old_info[exists]}" == true ]]; then
     echo "Zrušení redirectu přeskočeno: staré jméno '$_repo_path' je už obsazené (dočasné repo z minulého běhu, nebo cizí repo)." >&2
+    _redirect_result_ref=occupied
     return 0
   fi
+  if [[ -z "${_old_info[redirect_to]}" ]]; then
+    echo "Redirect starého jména '$_repo_path' už neexistuje – zrušení není potřeba."
+    _redirect_result_ref=absent
+    return 0
+  fi
+  _redirect_result_ref=broken
   _gh-api-input-retry "orgs/$GITHUB_ORG/repos" POST \
     "{\"name\":\"$_old_name\",\"visibility\":\"$GH_NEW_REPO_VISIBILITY\",\"auto_init\":false,\"description\":\"Docasne repo - rusi redirect po presunu na $_new_name. Bude smazano.\"}" \
     "založení dočasného repa '$_repo_path' (zrušení redirectu)" || return 1
@@ -312,7 +344,7 @@ _gh-governance-move-run() {
   local _src="$1" _name="$2" _dst="$3" _redirect="$4"
   declare -n _sum_ref="$5"
   local _state="" _archived="" _error="" _old_name _new_name _new_path _branch
-  local _run_sha _adopted=false _removed_login="" _delete_issue=""
+  local _run_sha _adopted=false _removed_login="" _delete_issue="" _redirect_result=""
   local -a _removed=()
   local -A _info=() _warn=()
   case "$_redirect" in
@@ -361,8 +393,10 @@ _gh-governance-move-run() {
   _gh-governance-move-warnings "$_new_path" "$_dst" _warn || return 1
   if [[ "$_redirect" == cancel ]]; then
     # I při dokončování (half/done) – zrušení redirectu mohlo v minulém běhu
-    # selhat; obsazené staré jméno funkce sama idempotentně přeskočí.
-    _gh-governance-move-break-redirect "$_old_name" "$_new_name" _delete_issue || return 1
+    # selhat; existující repo i chybějící redirect funkce sama idempotentně
+    # přeskočí (result occupied/absent).
+    _gh-governance-move-break-redirect "$_old_name" "$_new_name" \
+      _delete_issue _redirect_result || return 1
   fi
   if [[ "$_archived" == true ]]; then
     _gh-api-input-retry "repos/$_new_path" PATCH '{"archived":true}' \
@@ -378,6 +412,7 @@ _gh-governance-move-run() {
   _sum_ref[removed_teams]=$(printf '%s\n' "${_removed[@]-}")
   _sum_ref[removed_login]="$_removed_login"
   _sum_ref[delete_issue]="$_delete_issue"
+  _sum_ref[redirect_result]="$_redirect_result"
   _sum_ref[expected_teams]="${_GH_CONF[projects/$_dst/repository_teams]:-}"
   _sum_ref[rulesets]="${_GH_CONF[projects/$_dst/rulesets]:-}"
   _sum_ref[mhn]=$(_gh-repository-policy-properties-expected-mhn "$_dst") || return 1
@@ -493,7 +528,14 @@ _gh-governance-move-comment() {
   [[ "${_c_ref[archived]}" == true ]] && \
     echo "- repo bylo archivované: dearchivováno na dobu přesunu a znovu archivováno"
   if [[ "${_c_ref[redirect]}" == cancel ]]; then
-    echo "- redirect starého jména zrušen – stará URL přestala fungovat${_c_ref[delete_issue]:+ (žádost o smazání dočasného repa: ${_c_ref[delete_issue]})}"
+    case "${_c_ref[redirect_result]:-}" in
+      broken)
+        echo "- redirect starého jména zrušen – stará URL přestala fungovat${_c_ref[delete_issue]:+ (žádost o smazání dočasného repa: ${_c_ref[delete_issue]})}" ;;
+      absent)
+        echo "- redirect starého jména už neexistoval (zrušen dříve) – stará URL nefunguje" ;;
+      *)
+        echo "- zrušení redirectu přeskočeno – staré jméno je obsazené repem (dočasné repo čekající na smazání, nebo cizí repo); zkontroluj ručně" ;;
+    esac
   else
     echo "- redirect starého jména ponechán (\`--redirect\`) – stará URL funguje, dokud staré jméno někdo neobsadí"
   fi

@@ -30,22 +30,25 @@ _gh-governance-repo-name() {
 
 _gh-governance-repo-info() {
   # Načte metadata repa do nameref asoc. pole: exists (true/false), archived,
-  # default_branch, topics (CSV). rc 0 i pro neexistující repo (exists=false);
-  # rc 1 = chyba API.
+  # default_branch, topics (CSV), full_name. rc 0 i pro neexistující repo
+  # (exists=false); rc 1 = chyba API. Pozor: GET repos/{path} následuje GitHub
+  # rename redirect – full_name odlišný od dotazované cesty znamená, že pod
+  # dotazovaným jménem repo neleží (jméno nese jen redirect).
   # Použití: local -A _i=(); _gh-governance-repo-info <repo_path> _i
-  local _repo_path="$1" _row _error_file _error _archived _branch _topics _extra
+  local _repo_path="$1" _row _error_file _error _full _archived _branch _topics _extra
   declare -n _info_ref="$2"
-  _info_ref=([exists]=false [archived]=false [default_branch]="" [topics]="")
+  _info_ref=([exists]=false [archived]=false [default_branch]="" [topics]="" [full_name]="")
   _error_file=$(mktemp) || return 1
   if _row=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "repos/$_repo_path" \
-      --jq '[((.archived // false) | tostring), (.default_branch // ""), ((.topics // []) | join(","))] | @tsv' \
+      --jq '[(.full_name // ""), ((.archived // false) | tostring), (.default_branch // ""), ((.topics // []) | join(","))] | @tsv' \
       2>"$_error_file"); then
     rm -f "$_error_file"
-    IFS=$'\t' read -r _archived _branch _topics _extra <<< "$_row"
+    IFS=$'\t' read -r _full _archived _branch _topics _extra <<< "$_row"
     _info_ref[exists]=true
     _info_ref[archived]="$_archived"
     _info_ref[default_branch]="$_branch"
     _info_ref[topics]="$_topics"
+    _info_ref[full_name]="$_full"
     return 0
   fi
   _error=$(< "$_error_file")
