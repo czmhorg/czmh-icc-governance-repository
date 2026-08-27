@@ -10,7 +10,8 @@
 # lib/gh-governance-state.sh, lib/gh-governance-repo-ops.sh
 # (_gh-governance-ghp-topics, _gh-governance-apply-policy-and-state),
 # lib/gh-governance-report.sh, lib/gh-governance-manifest.sh (rebuild),
-# lib/gh-governance-issue.sh (track-delete sweep; jen v GitHub Actions).
+# lib/gh-governance-issue.sh (track-delete sweep; jen v GitHub Actions),
+# lib/gh-governance-deploy-manifest.sh (kontrola driftu kódu).
 [[ -n "${_GH_GOVERNANCE_RECONCILE_LOADED:-}" ]] && \
   declare -F _gh-governance-classify >/dev/null && return 0
 _GH_GOVERNANCE_RECONCILE_LOADED=1
@@ -309,6 +310,144 @@ _gh-governance-track-delete-sweep() {
   return 0
 }
 
+_gh-governance-toolkit-fetch() {
+  # Stáhne raw obsah souboru z toolkit repa (contents API, raw media type,
+  # 1 request) na stdout. rc 0 = OK; 1 = neexistuje (HTTP 404 – soubor, repo,
+  # nebo chybějící grant fine-grained PAT); 2 = jiná chyba (stderr gh projde).
+  # Vzor: _gh_manifest_fetch (gh-functions-user.sh).
+  # Použití: _gh-governance-toolkit-fetch <cesta> [<ref>]
+  local _path="$1" _ref="${2:-}" _err_file _err _url
+  _url="repos/${GITHUB_ORG}/${GH_TOOLKIT_REPO}/contents/${_path}"
+  [[ -n "$_ref" ]] && _url+="?ref=${_ref}"
+  _err_file=$(mktemp) || return 2
+  if GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "$_url" \
+      -H "Accept: application/vnd.github.raw+json" 2>"$_err_file"; then
+    rm -f "$_err_file"
+    return 0
+  fi
+  _err=$(< "$_err_file")
+  rm -f "$_err_file"
+  grep -qF '(HTTP 404)' <<< "$_err" && return 1
+  [[ -n "$_err" ]] && printf '%s\n' "$_err" >&2
+  return 2
+}
+
+_gh-governance-toolkit-tree() {
+  # Načte default větev a blob SHA všech souborů default větve toolkit repa
+  # (git/trees, recursive – 1 request). Selhání (repo nedostupné, ořezaný
+  # listing) zapíše jako jednu error položku reportu a vrátí rc 1 – kontrola
+  # driftu se pak přeskočí. Fine-grained PAT bez grantu vrací HTTP 404
+  # stejně jako neexistující repo.
+  # Použití: _gh-governance-toolkit-tree <nameref větve> <nameref mapy path→sha>
+  local -n _gtt_branch_ref="$1" _gtt_blob_ref="$2"
+  local _toolkit="${GITHUB_ORG}/${GH_TOOLKIT_REPO}" _err_file _err _trees _path _sha
+  _err_file=$(mktemp) || return 1
+  if ! _gtt_branch_ref=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
+      "repos/$_toolkit" --jq .default_branch 2>"$_err_file"); then
+    _err=$(tail -n 1 "$_err_file"); rm -f "$_err_file"
+    if grep -qF '(HTTP 404)' <<< "$_err"; then
+      _gh-governance-report-add error "kontrola driftu kodu selhala" "$_toolkit" \
+        "toolkit repo nedostupné (HTTP 404) – neexistuje, nebo bot nemá právo čtení"
+    else
+      _gh-governance-report-add error "kontrola driftu kodu selhala" "$_toolkit" \
+        "toolkit repo nedostupné: ${_err:-neznámá chyba}"
+    fi
+    return 1
+  fi
+  rm -f "$_err_file"
+  if ! _trees=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
+      "repos/$_toolkit/git/trees/${_gtt_branch_ref}?recursive=1" \
+      --jq '(.truncated|tostring) + "\n" + ([.tree[] | select(.type=="blob") | .path + "\t" + .sha] | join("\n"))'); then
+    _gh-governance-report-add error "kontrola driftu kodu selhala" "$_toolkit" \
+      "čtení stromu toolkit repa (git/trees) selhalo"
+    return 1
+  fi
+  if [[ "${_trees%%$'\n'*}" == "true" ]]; then
+    _gh-governance-report-add error "kontrola driftu kodu selhala" "$_toolkit" \
+      "listing toolkit repa je ořezán (truncated) – porovnání nelze provést"
+    return 1
+  fi
+  while IFS=$'\t' read -r _path _sha; do
+    [[ -n "$_path" && -n "$_sha" ]] || continue
+    _gtt_blob_ref["$_path"]="$_sha"
+  done <<< "${_trees#*$'\n'}"
+  return 0
+}
+
+_gh-governance-reconcile-code-drift-file() {
+  # Porovná jeden nasazený soubor gov repa s předlohou v toolkit repu.
+  # Gov strana se čte z HEAD checkoutu (ne working tree – obchází
+  # core.autocrlf) a normalizuje: bez hlavičky GENEROVANO, bez CR. První
+  # fáze porovná git blob SHA; při neshodě druhá fáze stáhne raw obsah
+  # z toolkit repa a porovná po normalizaci CR – rozdíl čistě v koncích
+  # řádků není drift. rc 0 = shoda, 1 = liší se, 2 = obsah z toolkit repa
+  # nelze stáhnout.
+  # Použití: _gh-governance-reconcile-code-drift-file <root> <dst> <src> <blob_sha> <ref>
+  local _root="$1" _dst="$2" _src="$3" _sha="$4" _ref="$5" _local_sha _gov _remote
+  _local_sha=$(git -C "$_root" cat-file blob "HEAD:$_dst" \
+    | _gh-governance-deploy-manifest-header-strip | tr -d '\r' \
+    | git hash-object --stdin) || return 1
+  [[ "$_local_sha" == "$_sha" ]] && return 0
+  _remote=$(_gh-governance-toolkit-fetch "$_src" "$_ref") || return 2
+  _gov=$(git -C "$_root" cat-file blob "HEAD:$_dst" \
+    | _gh-governance-deploy-manifest-header-strip | tr -d '\r')
+  _remote=$(tr -d '\r' <<< "$_remote")
+  [[ "$_gov" == "$_remote" ]] && return 0
+  return 1
+}
+
+_gh-governance-reconcile-code-drift() {
+  # Denní kontrola driftu kódu (docs/navrh/drift-kodu-gov-a-toolkit.md):
+  # soubory nasazované gov-syncem (manifest nasazení) musí mít v gov repu
+  # stejný obsah jako jejich předlohy v toolkit repu, který nese strukturu
+  # dev repa. Každá odlišnost = error položka reportu (issue do 24 h);
+  # nedostupné toolkit repo = jedna error položka. Vědomé zjednodušení:
+  # gov soubor bez hlavičky GENEROVANO se shodným obsahem projde jako čistý
+  # (hlavičku hlídá validační check PR). rc 1 jen infrastruktura (checkout).
+  # Použití: _gh-governance-reconcile-code-drift
+  local _root _branch _version _vlabel _path _dst _src _gov_repo
+  local -A _blob=()
+  _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_TOOLKIT_REPO GH_GOVERNANCE_REPO || return 1
+  _gov_repo="${GITHUB_ORG}/${GH_GOVERNANCE_REPO}"
+  _root=$(_gh-governance-checkout-root) || return 1
+  _gh-governance-toolkit-tree _branch _blob || return 0
+
+  # Kontext hlášek: verze toolkit repa (VERSION spravuje auto-bump workflow;
+  # do gov repa se nikdy nezapisuje – probudila by kontrolu verze skriptů).
+  _version=$(_gh-governance-toolkit-fetch VERSION "$_branch" 2>/dev/null) || _version=""
+  _version="${_version//$'\r'/}"; _version="${_version//$'\n'/}"
+  [[ "$_version" =~ ^[0-9]+$ ]] || _version=""
+  _vlabel="toolkit verze ${_version:-neznámá}"
+
+  # Směr toolkit → gov: existence a obsah každé předlohy z manifestu.
+  for _path in "${!_blob[@]}"; do
+    _dst=$(_gh-governance-deploy-manifest-counterpart "$_path" src) || continue
+    if ! git -C "$_root" cat-file -e "HEAD:$_dst" 2>/dev/null; then
+      _gh-governance-report-add error "drift kodu gov repa" "$_gov_repo" \
+        "$_dst v gov repu chybí ($_vlabel) – spusť gov-sync"
+      continue
+    fi
+    _gh-governance-reconcile-code-drift-file "$_root" "$_dst" "$_path" \
+        "${_blob[$_path]}" "$_branch"
+    case $? in
+      1) _gh-governance-report-add error "drift kodu gov repa" "$_gov_repo" \
+           "$_dst se liší od toolkit repa ($_vlabel) – nasaď aktuální kód z dev repa (gov-sync a/nebo push toolkitu), případně schval čekající gov-sync PR" ;;
+      2) _gh-governance-report-add error "kontrola driftu kodu selhala" \
+           "${GITHUB_ORG}/${GH_TOOLKIT_REPO}" "obsah '$_path' z toolkit repa nelze stáhnout" ;;
+    esac
+  done
+
+  # Směr gov → toolkit: nasazený soubor bez předlohy v toolkit repu.
+  while IFS= read -r _path; do
+    [[ -n "$_path" ]] || continue
+    _src=$(_gh-governance-deploy-manifest-counterpart "$_path" dst) || continue
+    [[ -n "${_blob[$_src]:-}" ]] && continue
+    _gh-governance-report-add error "drift kodu gov repa" "$_gov_repo" \
+      "$_src v toolkit repu chybí ($_vlabel) – dokonči nasazení toolkitu"
+  done < <(git -C "$_root" ls-tree -r --name-only HEAD)
+  return 0
+}
+
 _gh-governance-reconcile-run() {
   # Celý běh reconciliace: průchod výpisem rep organizace, klasifikace,
   # per-repo reconciliace (selhání jednoho repa běh nezastaví), počty rep
@@ -408,6 +547,11 @@ _gh-governance-reconcile-run() {
     _gh-governance-report-add error "neuspesna reconciliace repa" \
       "${GITHUB_ORG}/${GH_GOVERNANCE_REPO}" "track-delete sweep selhal"
   rm -f "$_listing_file"
+
+  # Denní kontrola driftu kódu gov repa vůči toolkit repu.
+  _gh-governance-reconcile-code-drift || \
+    _gh-governance-report-add error "kontrola driftu kodu selhala" \
+      "${GITHUB_ORG}/${GH_TOOLKIT_REPO}" "kontrola se nespustila (checkout gov repa nebo mktemp)"
 
   # Jeden commit+push posunutých ukazatelů na konci běhu; selhání pushe je
   # error v reportu, aplikované změny se nevrací (ukazatel smí být „starší").

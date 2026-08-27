@@ -103,7 +103,8 @@ _gh-governance-report-open-issue() {
 }
 
 _gh-governance-report-issue-sync() {
-  # Životní cyklus reconcile issue (governance-repo.md ř. 160–165):
+  # Životní cyklus reconcile issue (závazně: defs/defs-governance-repo.md,
+  # sekce „reconcile issue“):
   #   weekly + ≥1 warning/error → založí issue, nebo komentuje otevřené;
   #   weekly + čistý report     → otevřené issue zavře se závěrečným komentářem;
   #   daily  + ≥1 error         → založí issue, jen pokud žádné otevřené není

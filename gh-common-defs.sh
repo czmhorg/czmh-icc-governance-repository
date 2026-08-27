@@ -48,6 +48,11 @@ _GH_COMMON_DEFS_LOADED=1
 # Odvozený identifikátor <ghGlobalPrefix>-governance-repository (defs/defs.md).
 : "${GH_GOVERNANCE_REPO:=${GH_REPO_PREFIX}-governance-repository}"
 
+# Toolkit repo — distribuční repo skriptů, ze kterého sourcují uživatelé.
+# Odvozený identifikátor <ghGlobalPrefix>-gh-bash-toolkit (defs/defs.md).
+# Používá kontrola driftu kódu v reconcile a akční hláška gh-update.
+: "${GH_TOOLKIT_REPO:=${GH_REPO_PREFIX}-gh-bash-toolkit}"
+
 # Tým lidských adminů gov repa (governance-repo.md, souhrnná tabulka práv).
 # Testovací default; produkce: czmh-bbpk-governance-admins.
 # gov-init.sh tým nezakládá – jen ověřuje jeho existenci.
@@ -113,7 +118,12 @@ _GH_PROJECT_KEY_REGEX='^[a-z0-9]+$'
 
 # Minimální odstup pokusů o refresh completion cache v minutách
 # (single-flight: souběžné TABy nestahují paralelně, selhání se neopakuje hned).
+# Sdílí ho i fetch vzdálené verze skriptů (_gh-version-remote-refresh).
 : "${GH_COMPLETION_REFRESH_BACKOFF_MIN:=2}"
+
+# Maximální stáří cache vzdálené verze skriptů v minutách před background
+# fetchem toolkit repa (kontrola verze skriptů; výchozí 1440 = jednou denně).
+: "${GH_VERSION_CHECK_TTL_MIN:=1440}"
 
 # Kořen lokálního zrcadla pro vyhledávání v kódu projektů (gh-functions-search.sh).
 # Struktura: ${GH_SEARCH_MIRROR_DIR}/{projectKey}/{active|archived}/{ghRepoName}.git
@@ -253,6 +263,8 @@ _gh-gov-repo-sync-locked() {
 _gh-confd-sync() {
   # Synchronizuje pracovní klon gov repa (zdroj conf.d) a znovu načte
   # konfiguraci; volá se na začátku každé funkce, která conf.d potřebuje.
+  # Společný vstupní bod všech pracovních funkcí (i přes _gh-confd-sync-ro) —
+  # proto tudy vede blokace zastaralé verze skriptů.
   # Při _GH_CONFD_SYNC=0 (GH_CONFD_ROOT override, GitHub Actions) je no-op —
   # čte se lokální conf.d bez synchronizace. S --no-sync (jen read-only
   # operace) se git nespouští a zámek nebere — vyžaduje existující klon
@@ -260,6 +272,7 @@ _gh-confd-sync() {
   # S --hold-lock zůstane zámek pracovního repa po úspěchu držen (volající ho
   # uvolní přes _gh-work-repo-unlock; pro běhy, které do klonu dál zapisují).
   # Použití: _gh-confd-sync [--no-sync] [--hold-lock]
+  _gh-require-current-version || return 1
   local _a _no_sync=0 _hold=0
   for _a in "$@"; do
     case "$_a" in
@@ -692,5 +705,186 @@ _gh-list-project-repos() {
   done <<< "$_all"
   return 0
 }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Kontrola verze skriptů (docs/readme/README_COMMON.md).
+# Verze skriptů = rostoucí celé číslo v souboru VERSION v kořeni toolkit repa;
+# spravuje ji výhradně workflow version-bump.yml. V dev repu VERSION neexistuje
+# → _GH_SCRIPTS_VERSION je prázdná a všechny kontroly se tiše přeskakují.
+# Blokovat se smí jen na pozitivní zjištění „novější verze prokazatelně
+# existuje"; chybějící data (bez sítě, bez cache) nikdy neblokují (fail-open).
+# ══════════════════════════════════════════════════════════════════════════════
+
+_gh-version-read-file() {
+  # Přečte celé číslo verze z prvního řádku souboru do nameref; chybějící
+  # soubor nebo nečíselný obsah → prázdná hodnota (kontroly se přeskočí).
+  # Použití: local _v; _gh-version-read-file <soubor> _v
+  local _file="$1" _raw=""
+  declare -n _gvr_ref="$2"
+  _gvr_ref=""
+  [[ -f "$_file" ]] || return 0
+  IFS= read -r _raw < "$_file" 2>/dev/null || true
+  # Git Bash na Windows s core.autocrlf checkoutuje VERSION s CRLF.
+  _raw="${_raw%$'\r'}"
+  _gh-match "$_raw" '^[0-9]+$' && _gvr_ref="$_raw"
+  return 0
+}
+
+_gh-version-load() {
+  # Načte verzi skriptů z $_GH_COMMON_DIR/VERSION do _GH_SCRIPTS_VERSION.
+  # Volá se při sourcování; testy volají znovu po přesměrování _GH_COMMON_DIR.
+  _gh-version-read-file "$_GH_COMMON_DIR/VERSION" _GH_SCRIPTS_VERSION
+}
+
+_gh-version-cache-dir() {
+  # Kořen cache kontroly verze — sdílí adresář completion cache
+  # (~/.cache/gh-workspace); _gh_cache_dir žije v gh-functions-user.sh
+  # a gh-common-defs.sh na něm záviset nesmí.
+  printf '%s\n' "${HOME}/.cache/gh-workspace"
+}
+
+_gh-version-cache-write() {
+  # Atomicky (tmp + mv) zapíše číslo vzdálené verze do cache .version-remote
+  # a dotykem .version-last-refresh označí úspěšný refresh (TTL). Kromě
+  # fetche na pozadí ji po úspěchu volá i gh-update — odblokování bez čekání.
+  # Použití: _gh-version-cache-write <verze>
+  local _dir _tmp
+  _dir=$(_gh-version-cache-dir)
+  mkdir -p "$_dir" || return 1
+  _tmp=$(mktemp "$_dir/.version-remote.tmp.XXXXXX") || return 1
+  if ! printf '%s\n' "$1" > "$_tmp"; then
+    rm -f "$_tmp"
+    return 1
+  fi
+  mv "$_tmp" "$_dir/.version-remote" || return 1
+  touch "$_dir/.version-last-refresh"
+}
+
+_gh-version-remote-branch() {
+  # Vypíše jméno default větve remotu origin (bez prefixu origin/):
+  # symbolic-ref origin/HEAD s fallbackem main/master (origin/HEAD nemusí
+  # být v klonu nastaven, např. po ručním git clone starší verzí gitu).
+  local _b
+  _b=$(git -C "$_GH_COMMON_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
+  if [[ -n "$_b" ]]; then
+    printf '%s\n' "${_b#origin/}"
+    return 0
+  fi
+  for _b in main master; do
+    if git -C "$_GH_COMMON_DIR" rev-parse --verify --quiet "refs/remotes/origin/$_b" >/dev/null 2>&1; then
+      printf '%s\n' "$_b"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_gh-version-refresh-due() {
+  # rc 0 = má smysl spustit fetch vzdálené verze na pozadí: verze skriptů je
+  # známá a poslední úspěšný refresh je starší než TTL (nebo žádný nebyl).
+  # Levná kontrola mtime — hook při sourcování nespouští git ani subshell
+  # na pozadí, když je cache čerstvá (vzor priming completion cache).
+  [[ -n "$_GH_SCRIPTS_VERSION" ]] || return 1
+  local _marker="$(_gh-version-cache-dir)/.version-last-refresh"
+  [[ -f "$_marker" ]] || return 0
+  [[ -n "$(find "$_marker" -mmin "+${GH_VERSION_CHECK_TTL_MIN}" 2>/dev/null)" ]]
+}
+
+_gh-version-remote-refresh() {
+  # Pozadí: obnoví cache vzdálené verze skriptů fetchem toolkit repa —
+  # $_GH_COMMON_DIR musí být git klon s remote origin (pracovní strom se
+  # nemění, jen refy). Single-flight: bez --force se přeskočí při čerstvém
+  # .version-last-refresh (TTL) nebo čerstvém .version-refresh-lock (backoff
+  # po selhání). Všechna selhání jsou tichá s rc 0 — blokace smí vzniknout
+  # jen z pozitivního zjištění (fail-open).
+  # Použití: _gh-version-remote-refresh [--force]
+  local _a _force=false _dir _branch _remote=""
+  for _a in "$@"; do
+    case "$_a" in
+      --force) _force=true ;;
+      *) echo "Chyba: _gh-version-remote-refresh: neznámý argument '$_a'." >&2; return 1 ;;
+    esac
+  done
+  [[ -n "$_GH_SCRIPTS_VERSION" ]] || return 0
+  git -C "$_GH_COMMON_DIR" remote get-url origin &>/dev/null || return 0
+  _dir=$(_gh-version-cache-dir)
+  mkdir -p "$_dir" || return 0
+  if [[ "$_force" == false ]]; then
+    [[ -n "$(find "$_dir/.version-refresh-lock" -mmin "-${GH_COMPLETION_REFRESH_BACKOFF_MIN}" 2>/dev/null)" ]] \
+      && return 0
+    _gh-version-refresh-due || return 0
+  fi
+  touch "$_dir/.version-refresh-lock"
+  git -C "$_GH_COMMON_DIR" fetch --quiet 2>/dev/null || return 0
+  _branch=$(_gh-version-remote-branch) || return 0
+  _remote=$(git -C "$_GH_COMMON_DIR" show "origin/${_branch}:VERSION" 2>/dev/null)
+  _gh-match "$_remote" '^[0-9]+$' || return 0
+  _gh-version-cache-write "$_remote" || return 0
+  return 0
+}
+
+_gh-version-status() {
+  # Bez sítě: naplní nameref asoc. pole stavem verze skriptů ze tří čísel —
+  # verze v shellu (_GH_SCRIPTS_VERSION, načtena při sourcování), soubor
+  # VERSION na disku a cache vzdálené verze (plní _gh-version-remote-refresh).
+  # Klíče: state (current | stale-shell | outdated | unknown), shell, disk,
+  # remote. unknown = chybějící data (dev repo bez VERSION, prázdná cache) —
+  # volající se chová fail-open. Aritmetika s prefixem 10# (VERSION s vedoucí
+  # nulou by jinak byla octal a např. 08 chyba parsování).
+  # Použití: local -A _vs=(); _gh-version-status _vs
+  declare -n _gvs_ref="$1"
+  local _disk="" _remote=""
+  _gh-version-read-file "$_GH_COMMON_DIR/VERSION" _disk
+  _gh-version-read-file "$(_gh-version-cache-dir)/.version-remote" _remote
+  _gvs_ref=([state]=unknown [shell]="$_GH_SCRIPTS_VERSION" [disk]="$_disk" [remote]="$_remote")
+  [[ -n "$_GH_SCRIPTS_VERSION" && -n "$_disk" ]] || return 0
+  if (( 10#$_disk > 10#$_GH_SCRIPTS_VERSION )); then
+    _gvs_ref[state]=stale-shell
+  elif [[ -z "$_remote" ]]; then
+    _gvs_ref[state]=unknown
+  elif (( 10#$_remote > 10#$_disk )); then
+    _gvs_ref[state]=outdated
+  else
+    _gvs_ref[state]=current
+  fi
+  return 0
+}
+
+_gh-require-current-version() {
+  # Blokační brána pracovních funkcí (společné vstupní body _gh-confd-sync
+  # a _bb-require-login): zastaralé skripty zablokuje do provedení upgradu.
+  # stale-shell (na disku už je novější verze, v paměti shellu stará) → stačí
+  # zavřít okna; outdated → v interaktivním shellu nabídne rovnou gh-update,
+  # jinak akční hláška. current i unknown propouští (fail-open).
+  # Použití: _gh-require-current-version || return 1
+  local -A _vs=()
+  local _answer
+  _gh-version-status _vs
+  case "${_vs[state]}" in
+    stale-shell)
+      echo "Skripty byly aktualizovány na verzi ${_vs[disk]}; v tomto okně běží stará verze ${_vs[shell]}." >&2
+      echo "Zavři všechna okna Git Bash a otevři nová." >&2
+      return 1
+      ;;
+    outdated)
+      echo "Je k dispozici nová verze skriptů (${_vs[disk]} → ${_vs[remote]})." >&2
+      if [[ $- == *i* && -t 0 ]] && declare -f gh-update >/dev/null; then
+        read -r -p "Provést aktualizaci nyní? [a/N] " _answer
+        if [[ "$_answer" == [aA] ]]; then
+          gh-update
+          # I po úspěšném upgradu jsou funkce v paměti shellu staré —
+          # rozpracovaná operace se nespouští (gh-update vyzval zavřít okna).
+          return 1
+        fi
+      fi
+      echo "Aktualizaci provedeš příkazem: gh-update" >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+_GH_SCRIPTS_VERSION=""
+_gh-version-load
 
 # ══════════════════════════════════════════════════════════════════════════════
