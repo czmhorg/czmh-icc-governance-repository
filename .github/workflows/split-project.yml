@@ -1,6 +1,6 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 # Workflow split-project: hromadný přesun rep projektu podle mapy
-# splits/*.tsv schválené PR (docs/navrh/rozdeleni-projektu.md, fáze 2).
+# splits/*.tsv schválené PR (docs/implementovano/navrh/rozdeleni-projektu.md, fáze 2).
 # Vstupy workflow_dispatch tečou přes env a validují se regexy v entry
 # skriptu (žádná interpolace do run:). Sekvenční, fail-fast, restartovatelný
 # – nový dispatch přeskočí hotová repa a dokončí polopřesunutá. Spouštět

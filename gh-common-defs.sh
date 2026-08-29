@@ -27,6 +27,14 @@ _GH_COMMON_DEFS_LOADED=1
 # Prefix projektového topicu spravovaných rep: ghp-<projectKey> (např. ghp-bbpkid)
 : "${GH_PROJECT_TOPIC_PREFIX:=ghp-}"
 
+# Marker topicy migrace (defs/defs.md, defs-migrace.md): bb-gh-migrating nese
+# repo stále otevřené pro opakovanou migraci; bb-gh-migrated repo předané.
+# Interní konstanty (ne konfigurace). Žijí zde, protože je sdílí bb-migrate.sh,
+# tools/ i governance reconcile v gov repu (lib/bb-migration-control.sh se do
+# gov repa nenasazuje); helper _bb-migration-topic-present zůstává tam.
+_BB_MIGRATION_TOPIC_MARKER=bb-gh-migrating
+_BB_MIGRATION_TOPIC_MARKER_DONE=bb-gh-migrated
+
 # Rezervovaný prefix názvů repository rulesetů spravovaných automatikou
 # (defs/defs.md): <GH_RULESET_PREFIX>-<profil>, např. mh-policy-default.
 # Hodnota bez koncové pomlčky; pomlčku doplňuje kód v místě použití.
@@ -64,7 +72,7 @@ _GH_COMMON_DEFS_LOADED=1
 # jeho PAT zmigrovaná/založená repa neviděl a reconcile by na nich selhal).
 # Prázdná hodnota = chyba preflightu.
 # Testovací default: účet, pod kterým běží testy; produkce: czmh-mhi-git-bbpk-governance-bot.
-: "${GH_GOVERNANCE_BOT_USER:=mhgithubcopilot}"
+: "${GH_GOVERNANCE_BOT_USER:=czmha}"
 
 # Bypass adminů gov repa v rulesetu výchozí větve gov-default-branch
 # (gov-init.sh; docs/navrh/ochrana-gov-repa.md): pull_request = admini repa
@@ -152,6 +160,13 @@ _GH_PROJECT_KEY_REGEX='^[a-z0-9]+$'
 # Není to cache — obsah se commituje a pushuje; nesmí ho mazat čisticí nástroje.
 # Nezapomeň: používej ${HOME}/..., ne ~/... (tilda se neexpanduje ve všech kontextech).
 : "${GH_WORK_REPOS_ROOT:=${HOME}/.local/state/gh-work}"
+
+# Strategie merge pull requestu pro gh-pr-merge: merge (merge commit) nebo
+# squash. Výchozí merge — release tok opakovaně merguje tutéž integrační
+# větev do výchozí větve a opakovaný merge dlouhožijící větve funguje jen
+# s merge commitem (docs/implementovano/navrh/gh-pr-funkce.md). Squash lze
+# zvolit per PR volbou --squash; jiná hodnota proměnné je chyba.
+: "${GH_PR_MERGE_STRATEGY:=merge}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Locale-nezávislé regex validace (docs/bash/locale-rozsahy-regex-validace.md).
@@ -541,6 +556,31 @@ _gh-repo-resolve-or-project() {
     return 0
   fi
   _gh-repo-resolve-exact "$@"
+}
+
+_gh-repo-resolve-or-cwd() {
+  # Varianta pro repo-lokální funkce s volitelným repem (gh-info, gh-pr*):
+  # bez pozičních argumentů se repo odvodí z remote origin git repozitáře
+  # v aktuálním adresáři (přes git rev-parse funguje i z podadresáře klonu),
+  # s argumenty jde vše přes _gh-repo-resolve-exact. Origin URL projde
+  # resolverem (https i git@ tvar; tokenizovanou URL resolver ořízne) —
+  # i repo z aktuálního adresáře musí být spravované.
+  # Použití: local -A _rr=(); _gh-repo-resolve-or-cwd _rr "${_pos[@]}" || return 1
+  if [[ $# -ge 2 ]]; then
+    _gh-repo-resolve-exact "$@"
+    return $?
+  fi
+  if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
+    echo "Chyba: Aktuální adresář není git repozitář (nebo zadej <repo>, viz gh-help)." >&2
+    return 1
+  fi
+  local _grrc_url
+  _grrc_url=$(git remote get-url origin 2>/dev/null)
+  if [[ -z "$_grrc_url" ]]; then
+    echo "Chyba: Remote 'origin' není nastaven." >&2
+    return 1
+  fi
+  _gh-repo-resolve-exact "$1" "$_grrc_url"
 }
 
 _gh-fmt-duration() {

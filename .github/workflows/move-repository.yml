@@ -1,6 +1,6 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 # Workflow move-repository: issue s labelem move-repo → přesun spravovaného
-# repa mezi projekty řízeným přejmenováním (docs/navrh/rozdeleni-projektu.md).
+# repa mezi projekty řízeným přejmenováním (docs/implementovano/navrh/rozdeleni-projektu.md).
 # Bezpečnostní schéma shodné s new-repository.yml: parse job čte event
 # soubor (tělo issue se nikdy neinterpoluje do run:), execute dostává
 # zvalidované hodnoty přes env. Concurrency zamyká staré jméno repa (entitu,

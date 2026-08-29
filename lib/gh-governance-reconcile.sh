@@ -11,7 +11,8 @@
 # (_gh-governance-ghp-topics, _gh-governance-apply-policy-and-state),
 # lib/gh-governance-report.sh, lib/gh-governance-manifest.sh (rebuild),
 # lib/gh-governance-issue.sh (track-delete sweep; jen v GitHub Actions),
-# lib/gh-governance-deploy-manifest.sh (kontrola driftu kódu).
+# lib/gh-governance-deploy-manifest.sh (kontrola driftu kódu),
+# lib/gh-governance-codeowners.sh (správa CODEOWNERS dle pr_reviewers).
 [[ -n "${_GH_GOVERNANCE_RECONCILE_LOADED:-}" ]] && \
   declare -F _gh-governance-classify >/dev/null && return 0
 _GH_GOVERNANCE_RECONCILE_LOADED=1
@@ -397,7 +398,7 @@ _gh-governance-reconcile-code-drift-file() {
 }
 
 _gh-governance-reconcile-code-drift() {
-  # Denní kontrola driftu kódu (docs/navrh/drift-kodu-gov-a-toolkit.md):
+  # Denní kontrola driftu kódu (docs/implementovano/navrh/drift-kodu-gov-a-toolkit.md):
   # soubory nasazované gov-syncem (manifest nasazení) musí mít v gov repu
   # stejný obsah jako jejich předlohy v toolkit repu, který nese strukturu
   # dev repa. Každá odlišnost = error položka reportu (issue do 24 h);
@@ -457,6 +458,7 @@ _gh-governance-reconcile-run() {
   # Použití: _gh-governance-reconcile-run
   local _listing _name _archived _branch _topics _extra _class _value _err_file
   local _key _n _level _subset _listing_file _dead _manifest_added=0 _manifest_removed=0
+  local _pointer
   local -A _count_archived=() _count_live=()
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX GH_PROJECT_TOPIC_PREFIX || return 1
   _gh-governance-run-sha >/dev/null || return 1
@@ -489,10 +491,22 @@ _gh-governance-reconcile-run() {
             "${GITHUB_ORG}/${_name}" "archivované repo se přeskakuje, nic se nemění"
         else
           _count_live["$_key"]=$(( ${_count_live[$_key]:-0} + 1 ))
+          # Ukazatel před aplikací policy (posune ho reconcile-repo) — správa
+          # CODEOWNERS z něj odvozuje úroveň hlášení při přepisu sekce.
+          _pointer=$(_gh-governance-state-read "$_name" 2>/dev/null) || _pointer=""
           _err_file=$(mktemp) || return 1
           if ! _gh-governance-reconcile-repo "$_name" "$_branch" "$_key" 2>"$_err_file"; then
             _gh-governance-report-add error "neuspesna reconciliace repa" \
               "${GITHUB_ORG}/${_name}" "$(tail -n 1 "$_err_file")"
+          fi
+          rm -f "$_err_file"
+          # Správa CODEOWNERS dle pr_reviewers — nezávislá na výsledku
+          # reconciliace repa, vlastní tolerance selhání.
+          _err_file=$(mktemp) || return 1
+          if ! _gh-governance-reconcile-codeowners "$_name" "$_branch" "$_key" \
+              "$_topics" "$_pointer" 2>"$_err_file"; then
+            _gh-governance-report-add error "neuspesna reconciliace repa" \
+              "${GITHUB_ORG}/${_name}" "správa CODEOWNERS: $(tail -n 1 "$_err_file")"
           fi
           rm -f "$_err_file"
         fi ;;

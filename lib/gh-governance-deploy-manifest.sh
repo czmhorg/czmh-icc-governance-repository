@@ -1,7 +1,7 @@
 #!/bin/bash
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
-# Manifest nasazení kódu governance (docs/navrh/drift-kodu-gov-a-toolkit.md):
+# Manifest nasazení kódu governance (docs/implementovano/navrh/drift-kodu-gov-a-toolkit.md):
 # jeden zdroj pravdy pro to, které soubory dev repa nasazuje gov-sync.sh do
 # gov repa a kam. Stejná pravidla používá gov-sync.sh (kopírování s hlavičkou
 # GENEROVANO) i denní kontrola driftu kódu v reconcile (porovnání gov repa
@@ -12,6 +12,8 @@
 _GH_GOVERNANCE_DEPLOY_MANIFEST_LOADED=1
 
 _GH_GOVERNANCE_DEPLOY_HEADER='# GENEROVANO gov-sync.sh -- needitovat v gov repu'
+# Markdownová varianta (HTML komentář — '#' by se vykreslil jako nadpis H1).
+_GH_GOVERNANCE_DEPLOY_HEADER_MD='<!-- GENEROVANO gov-sync.sh -- needitovat v gov repu -->'
 
 _gh-governance-deploy-manifest-rules() {
   # Pravidla nasazení dev repo → gov repo, na stdout TSV řádky
@@ -28,7 +30,9 @@ _gh-governance-deploy-manifest-rules() {
     'lib/gh-repository-policy.sh' 'lib/' \
     'lib/gh-work-repo.sh'         'lib/' \
     'lib/gh-governance-*.sh'      'lib/' \
-    'gh-common-defs.sh'           'gh-common-defs.sh'
+    'gh-common-defs.sh'           'gh-common-defs.sh' \
+    'governance/templates/*.template' 'templates/' \
+    'governance/README-gov-repo.md' 'README.md'
 }
 
 _gh-governance-deploy-manifest-counterpart() {
@@ -66,48 +70,61 @@ _gh-governance-deploy-manifest-counterpart() {
 
 _gh-governance-deploy-manifest-header-add() {
   # Filtr stdin → stdout: vloží hlavičku GENEROVANO za shebang na prvním
-  # řádku, jinak na úplný začátek (prázdný vstup → jen hlavička). Zbytek
-  # vstupu projde bajtově beze změny (cat) — soubor bez koncového \n ho
-  # nezíská. Přesná inverze je _gh-governance-deploy-manifest-header-strip.
-  # Použití: _gh-governance-deploy-manifest-header-add < <zdroj> > <cíl>
-  local _first
+  # řádku, jinak na úplný začátek (prázdný vstup → jen hlavička). Styl 'md'
+  # vloží markdownovou variantu (HTML komentář). Zbytek vstupu projde bajtově
+  # beze změny (cat) — soubor bez koncového \n ho nezíská. Přesná inverze je
+  # _gh-governance-deploy-manifest-header-strip (umí obě varianty).
+  # Použití: _gh-governance-deploy-manifest-header-add [<sh|md>] < <zdroj> > <cíl>
+  local _first _hdr="$_GH_GOVERNANCE_DEPLOY_HEADER"
+  case "${1:-sh}" in
+    sh) ;;
+    md) _hdr="$_GH_GOVERNANCE_DEPLOY_HEADER_MD" ;;
+    *)  echo "Chyba: Styl hlavičky musí být sh nebo md (je '$1')." >&2; return 2 ;;
+  esac
   if IFS= read -r _first; then
     if [[ "$_first" == '#!'* ]]; then
-      printf '%s\n%s\n' "$_first" "$_GH_GOVERNANCE_DEPLOY_HEADER"
+      printf '%s\n%s\n' "$_first" "$_hdr"
     else
-      printf '%s\n%s\n' "$_GH_GOVERNANCE_DEPLOY_HEADER" "$_first"
+      printf '%s\n%s\n' "$_hdr" "$_first"
     fi
     cat
   else
     # Prázdný vstup, nebo jediný řádek bez koncového \n.
-    printf '%s\n' "$_GH_GOVERNANCE_DEPLOY_HEADER"
+    printf '%s\n' "$_hdr"
     [[ -n "$_first" ]] && printf '%s' "$_first"
     return 0
   fi
 }
 
+_gh-governance-deploy-manifest-is-header() {
+  # rc 0, je-li řádek hlavičkou GENEROVANO v kterékoli variantě (sh i md).
+  # Použití: _gh-governance-deploy-manifest-is-header <řádek>
+  [[ "$1" == "$_GH_GOVERNANCE_DEPLOY_HEADER" \
+     || "$1" == "$_GH_GOVERNANCE_DEPLOY_HEADER_MD" ]]
+}
+
 _gh-governance-deploy-manifest-header-strip() {
-  # Filtr stdin → stdout: odstraní hlavičku GENEROVANO z prvního řádku, nebo
-  # z druhého řádku za shebangem; vstup bez hlavičky projde beze změny.
-  # Zbytek vstupu projde bajtově (cat).
+  # Filtr stdin → stdout: odstraní hlavičku GENEROVANO (kteroukoli variantu,
+  # sh i md) z prvního řádku, nebo z druhého řádku za shebangem; vstup bez
+  # hlavičky projde beze změny. Zbytek vstupu projde bajtově (cat).
   # Použití: _gh-governance-deploy-manifest-header-strip < <soubor>
   local _first _second
   if ! IFS= read -r _first; then
     # Prázdný vstup, nebo jediný řádek bez koncového \n.
-    [[ -n "$_first" && "$_first" != "$_GH_GOVERNANCE_DEPLOY_HEADER" ]] \
+    [[ -n "$_first" ]] && ! _gh-governance-deploy-manifest-is-header "$_first" \
       && printf '%s' "$_first"
     return 0
   fi
-  if [[ "$_first" == "$_GH_GOVERNANCE_DEPLOY_HEADER" ]]; then
+  if _gh-governance-deploy-manifest-is-header "$_first"; then
     cat
     return 0
   fi
   printf '%s\n' "$_first"
   if [[ "$_first" == '#!'* ]]; then
     if IFS= read -r _second; then
-      [[ "$_second" == "$_GH_GOVERNANCE_DEPLOY_HEADER" ]] || printf '%s\n' "$_second"
+      _gh-governance-deploy-manifest-is-header "$_second" || printf '%s\n' "$_second"
     else
-      [[ -n "$_second" && "$_second" != "$_GH_GOVERNANCE_DEPLOY_HEADER" ]] \
+      [[ -n "$_second" ]] && ! _gh-governance-deploy-manifest-is-header "$_second" \
         && printf '%s' "$_second"
       return 0
     fi

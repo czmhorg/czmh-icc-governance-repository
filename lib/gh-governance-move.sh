@@ -2,7 +2,7 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
 # Přesun repa mezi GH projekty (move-repository, split-project) dle návrhu
-# docs/navrh/rozdeleni-projektu.md: řízené přejmenování + přepnutí topicu
+# docs/implementovano/navrh/rozdeleni-projektu.md: řízené přejmenování + přepnutí topicu
 # ghp-* + aplikace politiky cílového projektu + přesun ukazatele state/
 # a řádku completion manifestu; volitelné zrušení GitHub redirectu starého
 # jména dočasným repem (ověřené chování:
@@ -428,7 +428,7 @@ _gh-governance-move-run() {
 }
 
 _gh-governance-split-map-check() {
-  # Zvaliduje mapu rozdělení projektu (docs/navrh/rozdeleni-projektu.md,
+  # Zvaliduje mapu rozdělení projektu (docs/implementovano/navrh/rozdeleni-projektu.md,
   # fáze 0/2): TSV řádky ghName<TAB>newProjectKey[<TAB>keep], bez hlavičky
   # a prázdných řádků, LF, unikátní ghName, cílový klíč ≠ zdrojový,
   # setříděno LC_ALL=C podle ghName (deterministický diff v gov repu).

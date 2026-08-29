@@ -1,7 +1,7 @@
 #!/bin/bash
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
-# Entry skript workflow split-project (docs/navrh/rozdeleni-projektu.md,
+# Entry skript workflow split-project (docs/implementovano/navrh/rozdeleni-projektu.md,
 # fáze 2); spustitelný i lokálně nad checkoutem gov repa. Hromadný přesun
 # rep podle mapy splits/*.tsv schválené PR: sekvenčně per repo (každé
 # dokončit celé před dalším), fail-fast při selhání – běh je restartovatelný
