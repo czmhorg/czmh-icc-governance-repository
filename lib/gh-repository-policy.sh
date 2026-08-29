@@ -215,11 +215,16 @@ _gh-ruleset-payload() {
   # docs/github/branch-protection-vs-rulesets-mapovani.md a rozhodnutí návrhu:
   #   - allow_force_pushes/allow_deletions=false → pravidlo non_fast_forward/deletion,
   #   - required_status_checks bez checků → pravidlo se vynechá (API odmítá []),
-  #   - restrictions != null → pravidlo update, jen má-li ruleset bypass actora,
-  #   - enforce_admins=false → bypass actor RepositoryRole 5 (admin).
-  # Použití: _gh-ruleset-payload <projectKey> <profil> <jenkins:0|1> [actor_id]
-  local _key="$1" _profile="$2" _jenkins="$3" _actor_id="${4:-}"
-  local _field _value _bypass_actors="" _rules="" _sep
+  #   - restrictions != null → pravidlo update, jen má-li ruleset bypass actora
+  #     Jenkins/admin (bot se do podmínky nepočítá — jinak by na profilech
+  #     s restrictions směl větve aktualizovat jen bot),
+  #   - enforce_admins=false → bypass actor RepositoryRole 5 (admin),
+  #   - <bot_actor_id> neprázdné → bypass actor User always pro governance
+  #     bota (zápis obsahu spravovaných rep přes Contents API — CODEOWNERS;
+  #     bot je admin každého repa, bypass jeho práva nerozšiřuje).
+  # Použití: _gh-ruleset-payload <projectKey> <profil> <jenkins:0|1> [jenkins_actor_id] [bot_actor_id]
+  local _key="$1" _profile="$2" _jenkins="$3" _actor_id="${4:-}" _bot_id="${5:-}"
+  local _field _value _bypass_actors="" _update_bypass="" _rules="" _sep
   for _field in branches $_GH_CONF_PROFILE_FIELDS; do
     if [[ -z "${_GH_CONF[profiles/$_profile/$_field]:-}" ]]; then
       echo "Chyba: Profil '$_profile' (projekt '$_key') nemá klíč '$_field' – payload rulesetu nelze sestavit. Zkontroluj conf.d/profiles/$_profile.conf." >&2
@@ -237,6 +242,11 @@ _gh-ruleset-payload() {
   if [[ "${_GH_CONF[profiles/$_profile/enforce_admins]}" == false ]]; then
     _bypass_actors+="${_bypass_actors:+, }"'{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }'
   fi
+  # Snapshot pro podmínku pravidla update — jen bypass Jenkins/admin výše.
+  _update_bypass="$_bypass_actors"
+  if [[ -n "$_bot_id" ]]; then
+    _bypass_actors+="${_bypass_actors:+, }"'{ "actor_id": '"$_bot_id"', "actor_type": "User", "bypass_mode": "always" }'
+  fi
 
   local -a _rules_arr=()
   _rules_arr+=("$(printf '{ "type": "pull_request", "parameters": { "required_approving_review_count": %s, "dismiss_stale_reviews_on_push": %s, "require_code_owner_review": %s, "require_last_push_approval": false, "required_review_thread_resolution": false } }' \
@@ -251,7 +261,7 @@ _gh-ruleset-payload() {
   fi
   _value="${_GH_CONF[profiles/$_profile/restrictions]}"
   _value="${_value//[[:space:]]/}"
-  if [[ "$_value" != null && -n "$_bypass_actors" ]]; then
+  if [[ "$_value" != null && -n "$_update_bypass" ]]; then
     _rules_arr+=('{ "type": "update" }')
   fi
   [[ "${_GH_CONF[profiles/$_profile/allow_force_pushes]}" == false ]] && \
@@ -284,8 +294,14 @@ _gh-ruleset-payloads-build() {
   # validace konfigurace před první mutací (včetně lookupu actor_id).
   # Použití: local -A _p=(); _gh-ruleset-payloads-build <projectKey> <jenkins_login> _p
   local _key="$1" _jenkins_login="$2" _items _profile _jenkins _actor_id _payload
+  local _bot_id=""
   declare -n _payloads_ref="$3"
   _items=$(_gh-conf-rulesets-items "$_key") || return 1
+  # Governance bot je bypass actor always každého rulesetu (zápis CODEOWNERS
+  # přes Contents API); bez nastaveného bota (offline testy) se vynechá.
+  if [[ -n "${GH_GOVERNANCE_BOT_USER:-}" ]]; then
+    _gh-user-id "$GH_GOVERNANCE_BOT_USER" _bot_id || return 1
+  fi
   while IFS=$'\t' read -r _profile _jenkins; do
     _actor_id=""
     if [[ "$_jenkins" == 1 ]]; then
@@ -295,7 +311,7 @@ _gh-ruleset-payloads-build() {
       fi
       _gh-user-id "$_jenkins_login" _actor_id || return 1
     fi
-    _payload=$(_gh-ruleset-payload "$_key" "$_profile" "$_jenkins" "$_actor_id") || return 1
+    _payload=$(_gh-ruleset-payload "$_key" "$_profile" "$_jenkins" "$_actor_id" "$_bot_id") || return 1
     _payloads_ref["${GH_RULESET_PREFIX}-$_profile"]="$_payload"
   done <<< "$_items"
 }
