@@ -1,9 +1,9 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
-# Výchozí vlastníci všech cest = týmy projektu {{PROJECT_KEY}} z konfigurace
-# governance (conf.d, klíč pr_reviewers). GitHub z nich při otevření PR
+# Výchozí vlastník všech cest = tým projektu {{PROJECT_KEY}} z konfigurace
+# governance (conf.d, klíč pr_reviewers_team). GitHub z něj při otevření PR
 # automaticky vytvoří žádost o review; konkrétní členy vybírá týmové
 # round robin přiřazení.
 # V CODEOWNERS vyhrává poslední odpovídající řádek — vlastní pravidla
-# přidávejte POD tuto sekci, pro konkrétní cesty tím výchozí vlastníky
+# přidávejte POD tuto sekci, pro konkrétní cesty tím výchozího vlastníka
 # přebijete. Jak mechanismus funguje a jak z něj ven: CODEOWNERS_README.md.
 * {{OWNERS}}

@@ -4,11 +4,11 @@
 
 Tento soubor i spravovanou sekci v `.github/CODEOWNERS` generuje denní
 governance reconcile z konfigurace projektu `{{PROJECT_KEY}}` v gov repu
-(`conf.d/projects/{{PROJECT_KEY}}.conf`, klíč `pr_reviewers`).
+(`conf.d/projects/{{PROJECT_KEY}}.conf`, klíč `pr_reviewers_team`).
 
 ## Jak to funguje
 
-- Při otevření PR požádá GitHub o review týmy ze spravované sekce
+- Při otevření PR požádá GitHub o review tým ze spravované sekce
   (`* {{OWNERS}}`); konkrétní členy vybírá týmové round robin přiřazení
   (autor PR se vynechává).
 - Další reviewery může autor PR kdykoli přidat ručně — eskalace zůstává
@@ -17,12 +17,12 @@ governance reconcile z konfigurace projektu `{{PROJECT_KEY}}` v gov repu
 ## Vlastní pravidla
 
 V CODEOWNERS vyhrává poslední odpovídající řádek. Vlastní řádky přidávejte
-POD spravovanou sekci — pro konkrétní cesty tím výchozí vlastníky přebijete.
+POD spravovanou sekci — pro konkrétní cesty tím výchozího vlastníka přebijete.
 Reconcile vlastní jen sekci mezi svými značkami; zbytku souboru se nedotýká.
 Zásah do obsahu sekce reconcile vrátí a ohlásí.
 
 ## Cesta ven z mechanismu
 
-Odeberte klíč `pr_reviewers` z `conf.d/projects/{{PROJECT_KEY}}.conf`
+Odeberte klíč `pr_reviewers_team` z `conf.d/projects/{{PROJECT_KEY}}.conf`
 (změna konfigurace v gov repu). Příští reconcile spravovanou sekci i tento
 soubor odstraní; vlastní řádky v CODEOWNERS zůstanou zachovány.

@@ -168,6 +168,13 @@ _GH_PROJECT_KEY_REGEX='^[a-z0-9]+$'
 # zvolit per PR volbou --squash; jiná hodnota proměnné je chyba.
 : "${GH_PR_MERGE_STRATEGY:=merge}"
 
+# Pager pro diff v gh-pr-diff, když je stdout terminál (v rouře/přesměrování
+# se nepoužije nikdy). -R nechá projít barvy, -FX ukončí krátký diff rovnou
+# bez čekání na q. Prázdná hodnota = bez stránkování. Bez dvojtečky v ${...=}
+# záměrně: nastavená prázdná hodnota se respektuje jako vypnuto, := by ji
+# přepsalo defaultem.
+: "${GH_PR_DIFF_PAGER=${PAGER:-less -RFX}}"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Locale-nezávislé regex validace (docs/bash/locale-rozsahy-regex-validace.md).
 # Definováno před sourcováním lib/ modulů níže — _gh-conf-load validuje

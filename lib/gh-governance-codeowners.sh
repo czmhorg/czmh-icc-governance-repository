@@ -2,7 +2,7 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
 # Distribuce spravované sekce .github/CODEOWNERS a doprovodného
-# CODEOWNERS_README.md do spravovaných rep podle klíče pr_reviewers
+# CODEOWNERS_README.md do spravovaných rep podle klíče pr_reviewers_team
 # (defs/defs.md; docs/plans/plan-codeowners-distribuce.md). Rozhodovací
 # logika je v čistých funkcích (offline testy), zápisy jdou přes Contents
 # API (jeden commit na soubor, bez klonu; přes rulesety projde bot jako
@@ -32,27 +32,21 @@ _GH_GOVERNANCE_CODEOWNERS_HEADER_MD='<!-- GENEROVANO reconcile -- needitovat, pr
 _GH_GOVERNANCE_CODEOWNERS_TEMPLATE="templates/CODEOWNERS-section.template"
 _GH_GOVERNANCE_CODEOWNERS_README_TEMPLATE="templates/CODEOWNERS_README.template"
 
-_gh-governance-codeowners-owners-from-csv() {
-  # Převede CSV slugů týmů na seznam vlastníků pro řádek CODEOWNERS:
-  # "@<org>/<tym1> @<org>/<tym2>". Prázdné CSV → prázdný výstup. Čistá funkce.
-  # Použití: _gh-governance-codeowners-owners-from-csv <csv> <nameref>
+_gh-governance-codeowners-owner-from-slug() {
+  # Převede slug týmu na vlastníka pro řádek CODEOWNERS: "@<org>/<tym>".
+  # Prázdný slug → prázdný výstup. Čistá funkce.
+  # Použití: _gh-governance-codeowners-owner-from-slug <slug> <nameref>
   declare -n _oc_ref="$2"
-  local _item _rest="$1,"
   _oc_ref=""
   [[ -n "$1" ]] || return 0
-  while [[ -n "$_rest" ]]; do
-    _item="${_rest%%,*}"
-    _rest="${_rest#*,}"
-    [[ -n "$_item" ]] || continue
-    _oc_ref+="${_oc_ref:+ }@${GITHUB_ORG}/${_item}"
-  done
+  _oc_ref="@${GITHUB_ORG}/$1"
 }
 
 _gh-governance-codeowners-owners() {
-  # Vlastníci dle aktuální konfigurace projektu (klíč pr_reviewers).
+  # Vlastník dle aktuální konfigurace projektu (klíč pr_reviewers_team).
   # Použití: _gh-governance-codeowners-owners <projectKey> <nameref>
-  _gh-governance-codeowners-owners-from-csv \
-    "${_GH_CONF[projects/$1/pr_reviewers]:-}" "$2"
+  _gh-governance-codeowners-owner-from-slug \
+    "${_GH_CONF[projects/$1/pr_reviewers_team]:-}" "$2"
 }
 
 _gh-governance-codeowners-old-owners() {
@@ -63,14 +57,14 @@ _gh-governance-codeowners-old-owners() {
   # Prázdný výstup = klíč tehdy nebyl, soubor/SHA neexistuje, nebo bez SHA.
   # Použití: _gh-governance-codeowners-old-owners <root> <sha> <projectKey> <nameref>
   declare -n _oo_ref="$4"
-  local _line _csv=""
+  local _line _slug=""
   _oo_ref=""
   [[ -n "$2" ]] || return 0
   while IFS= read -r _line; do
     _line="${_line%$'\r'}"
-    [[ "$_line" == pr_reviewers=* ]] && { _csv="${_line#pr_reviewers=}"; break; }
+    [[ "$_line" == pr_reviewers_team=* ]] && { _slug="${_line#pr_reviewers_team=}"; break; }
   done < <(git -C "$1" show "$2:conf.d/projects/$3.conf" 2>/dev/null)
-  _gh-governance-codeowners-owners-from-csv "$_csv" "$4"
+  _gh-governance-codeowners-owner-from-slug "$_slug" "$4"
 }
 
 _gh-governance-codeowners-expand() {
@@ -107,7 +101,7 @@ _gh-governance-codeowners-notice() {
   declare -n _cn_ref="$2"
   _cn_ref="${_GH_GOVERNANCE_CODEOWNERS_NOTICE_MARK} tento soubor NENI pod spravou
 # governance reconcile (chybi spravovana sekce), ackoli projekt '$1' ma
-# v conf.d klic pr_reviewers — automaticke zadosti o review se z konfigurace
+# v conf.d klic pr_reviewers_team — automaticke zadosti o review se z konfigurace
 # neaplikuji. Obnoveni spravy: smazte tento soubor, pristi denni reconcile ho
 # zalozi znovu se spravovanou sekci (vlastni pravidla si predtim zalohujte)."
 }
@@ -173,7 +167,7 @@ _gh-governance-codeowners-plan() {
   _pl_action=none
   _pl_content=""
   if [[ -z "$_pl_sec" ]]; then
-    # pr_reviewers nezadán: úklid vlastní sekce; cizí obsah se nechává být.
+    # pr_reviewers_team nezadán: úklid vlastní sekce; cizí obsah se nechává být.
     [[ "$_pl_exists" == 1 ]] || return 0
     _gh-governance-codeowners-split "$_pl_cur" _pl_before _pl_found _pl_after \
       || return 0
@@ -258,28 +252,24 @@ _gh-governance-codeowners-file-delete() {
 }
 
 _gh-governance-codeowners-teams-check() {
-  # Warning za každý tým z pr_reviewers bez práva write na repu — GitHub
+  # Warning za tým z pr_reviewers_team bez práva write na repu — GitHub
   # CODEOWNERS vlastníka bez write ignoruje (runtime stav repa; statickou
   # vazbu na repository_teams hlídá parser conf.d). 1 GET.
   # Použití: _gh-governance-codeowners-teams-check <repoPath> <projectKey>
-  local _listing _slug _perm _item _rest
+  local _listing _slug _perm _team
   local -A _perms=()
+  _team="${_GH_CONF[projects/$2/pr_reviewers_team]:-}"
+  [[ -n "$_team" ]] || return 0
   _listing=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "repos/$1/teams" \
     --paginate --jq '.[] | .slug + "\t" + .permission') || return 1
   while IFS=$'\t' read -r _slug _perm; do
     [[ -n "$_slug" ]] && _perms["$_slug"]="$_perm"
   done <<< "$_listing"
-  _rest="${_GH_CONF[projects/$2/pr_reviewers]:-},"
-  while [[ -n "$_rest" && "$_rest" != , ]]; do
-    _item="${_rest%%,*}"
-    _rest="${_rest#*,}"
-    [[ -n "$_item" ]] || continue
-    case "${_perms[$_item]:-}" in
-      push|maintain|admin) ;;
-      *) _gh-governance-report-add warning "pr_reviewers tym bez write" "$1" \
-           "tým '$_item' nemá na repu právo write (má '${_perms[$_item]:-žádné}') — GitHub ho v CODEOWNERS ignoruje" ;;
-    esac
-  done
+  case "${_perms[$_team]:-}" in
+    push|maintain|admin) ;;
+    *) _gh-governance-report-add warning "pr_reviewers_team tym bez write" "$1" \
+         "tým '$_team' nemá na repu právo write (má '${_perms[$_team]:-žádné}') — GitHub ho v CODEOWNERS ignoruje" ;;
+  esac
   return 0
 }
 
@@ -304,7 +294,7 @@ _gh-governance-codeowners-readme-sync() {
     if [[ $_exists -eq 0 || "$_current" != "$_desired" ]]; then
       _gh-governance-codeowners-file-write "$_repo_path" \
         "$_GH_GOVERNANCE_CODEOWNERS_README_PATH" "$_branch" "$_desired"$'\n' \
-        "$_sha" "governance: CODEOWNERS_README dle pr_reviewers" || return 1
+        "$_sha" "governance: CODEOWNERS_README dle pr_reviewers_team" || return 1
       _gh-governance-report-add info "sprava CODEOWNERS" "$_repo_path" \
         "CODEOWNERS_README.md $( [[ $_exists -eq 0 ]] && echo založen || echo obnoven )"
     fi
@@ -323,7 +313,7 @@ _gh-governance-codeowners-readme-sync() {
 
 _gh-governance-reconcile-codeowners() {
   # Správa CODEOWNERS jednoho spravovaného nearchivovaného repa dle klíče
-  # pr_reviewers — tabulka chování plánu. Repo s topicem migrace se
+  # pr_reviewers_team — tabulka chování plánu. Repo s topicem migrace se
   # přeskakuje celé (opakovaná migrace zrcadlí větve z Bitbucketu, commit
   # by kolidoval), repo bez výchozí větve také. Bez klíče i sekce = 0 zápisů;
   # kontrola je stateless (1 GET na repo) — osiřelou sekci uklidí i po ztrátě
@@ -355,14 +345,14 @@ _gh-governance-reconcile-codeowners() {
     create)
       _gh-governance-codeowners-file-write "$_repo_path" \
         "$_GH_GOVERNANCE_CODEOWNERS_PATH" "$_branch" "$_new" "" \
-        "governance: CODEOWNERS se spravovanou sekci (pr_reviewers)" || return 1
+        "governance: CODEOWNERS se spravovanou sekci (pr_reviewers_team)" || return 1
       _gh-governance-report-add info "sprava CODEOWNERS" "$_repo_path" \
         "CODEOWNERS založen se spravovanou sekcí (${_owners})"
       _managed=1 ;;
     rewrite)
       _gh-governance-codeowners-file-write "$_repo_path" \
         "$_GH_GOVERNANCE_CODEOWNERS_PATH" "$_branch" "$_new" "$_sha" \
-        "governance: sprava sekce CODEOWNERS dle pr_reviewers" || return 1
+        "governance: sprava sekce CODEOWNERS dle pr_reviewers_team" || return 1
       # Ruční zásah vs. změna conf.d: sekce vzniklá ze staré konfigurace
       # (ukazatel před během) je legitimní stav, cokoli jiného je zásah.
       # Bez ukazatele (adopce) se zásah neprokazuje — info.
@@ -386,22 +376,22 @@ _gh-governance-reconcile-codeowners() {
         "$_GH_GOVERNANCE_CODEOWNERS_PATH" "$_branch" "$_new" "$_sha" \
         "governance: oznameni v CODEOWNERS (soubor neni pod spravou)" || return 1
       _gh-governance-report-add warning "CODEOWNERS mimo spravu" "$_repo_path" \
-        "soubor bez spravované sekce — vloženo oznámení; pr_reviewers se neaplikuje" ;;
+        "soubor bez spravované sekce — vloženo oznámení; pr_reviewers_team se neaplikuje" ;;
     warn)
       _gh-governance-report-add warning "CODEOWNERS mimo spravu" "$_repo_path" \
-        "soubor bez spravované sekce (oznámení už vloženo) — pr_reviewers se neaplikuje" ;;
+        "soubor bez spravované sekce (oznámení už vloženo) — pr_reviewers_team se neaplikuje" ;;
     remove)
       _gh-governance-codeowners-file-write "$_repo_path" \
         "$_GH_GOVERNANCE_CODEOWNERS_PATH" "$_branch" "$_new" "$_sha" \
-        "governance: uklid sekce CODEOWNERS po odebrani pr_reviewers" || return 1
+        "governance: uklid sekce CODEOWNERS po odebrani pr_reviewers_team" || return 1
       _gh-governance-report-add info "sprava CODEOWNERS" "$_repo_path" \
-        "spravovaná sekce odstraněna po odebrání pr_reviewers" ;;
+        "spravovaná sekce odstraněna po odebrání pr_reviewers_team" ;;
     delete)
       _gh-governance-codeowners-file-delete "$_repo_path" \
         "$_GH_GOVERNANCE_CODEOWNERS_PATH" "$_branch" "$_sha" \
-        "governance: uklid CODEOWNERS po odebrani pr_reviewers" || return 1
+        "governance: uklid CODEOWNERS po odebrani pr_reviewers_team" || return 1
       _gh-governance-report-add info "sprava CODEOWNERS" "$_repo_path" \
-        "CODEOWNERS smazán po odebrání pr_reviewers (zbylo by jen bílé místo)" ;;
+        "CODEOWNERS smazán po odebrání pr_reviewers_team (zbylo by jen bílé místo)" ;;
     none)
       # Klíč nezadán a soubor cizí nebo žádný — README nemá co uklízet
       # (životní cyklus se sekcí; generovaný bez sekce tu nikdy nevznikl).

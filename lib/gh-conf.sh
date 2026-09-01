@@ -24,9 +24,9 @@ _GH_CONF_PROFILE_FIELDS="required_status_checks enforce_admins dismiss_stale_rev
 _GH_CONF_PROFILE_BOOL_FIELDS="enforce_admins dismiss_stale_reviews require_code_owner_reviews allow_force_pushes allow_deletions required_linear_history"
 _GH_CONF_PROJECT_FIELDS="display_name domain rulesets repository_teams repository_creators repository_archivers"
 # Nepovinná pole projektu; přítomný klíč musí mít neprázdnou hodnotu.
-_GH_CONF_PROJECT_OPT_FIELDS="description pr_reviewers"
+_GH_CONF_PROJECT_OPT_FIELDS="description pr_reviewers_team"
 # Práva v repository_teams zajišťující write — CODEOWNERS vlastníka bez write
-# GitHub ignoruje, tým v pr_reviewers proto musí mít některé z nich.
+# GitHub ignoruje, tým v pr_reviewers_team proto musí mít některé z nich.
 _GH_CONF_PR_REVIEWERS_PERMS="push write maintain admin"
 # Formát hodnoty klíče domain projektu: <MHN>/<typ> (odkaz na domains/<MHN>/<typ>.conf).
 _GH_CONF_DOMAIN_REF_REGEX='^[A-Z][A-Z0-9]*/[a-z][a-z0-9-]*$'
@@ -238,7 +238,7 @@ _gh-conf-validate-project() {
   # Použití: _gh-conf-validate-project <key> <errors_ref> <profiles_seen_ref> <domains_seen_ref>
   local _pk="$1" _rel="projects/$1.conf" _field _key _value _domain _profile _item _rest
   local _teams _perm _has_write
-  local -A _rs_seen=() _pr_seen=()
+  local -A _rs_seen=()
   declare -n _vp_profiles="$3" _vp_domains="$4"
   for _field in $_GH_CONF_PROJECT_FIELDS; do
     [[ -n "${_GH_CONF[projects/$_pk/$_field]:-}" ]] || \
@@ -272,28 +272,24 @@ _gh-conf-validate-project() {
     [[ ",$_value," != *",${GH_SECURITY_MANAGERS_TEAM}|"* ]] || \
       _gh-conf-err "$2" "$_rel" "repository_teams obsahuje tým '${GH_SECURITY_MANAGERS_TEAM}' — je implicitní součástí politiky a nekonfiguruje se"
   fi
-  # pr_reviewers (defs/defs.md): CSV slugů týmů pro spravovanou sekci
-  # CODEOWNERS; statická kontrola vazby na repository_teams chytí chybu
+  # pr_reviewers_team (defs/defs.md): slug jediného týmu pro spravovanou
+  # sekci CODEOWNERS; statická kontrola vazby na repository_teams chytí chybu
   # už při načtení conf.d (po nasazení i check validate-conf v PR).
-  _value="${_GH_CONF[projects/$_pk/pr_reviewers]:-}"
-  if [[ -n "$_value" ]] && _gh-conf-validate-csv "$_value" "$_GH_CONF_NAME_REGEX" "$_rel" pr_reviewers "$2"; then
-    _teams=",${_GH_CONF[projects/$_pk/repository_teams]:-},"
-    _rest="$_value,"
-    while [[ -n "$_rest" ]]; do
-      _item="${_rest%%,*}"
-      _rest="${_rest#*,}"
-      if [[ -v _pr_seen["$_item"] ]]; then
-        _gh-conf-err "$2" "$_rel" "duplicitní tým '$_item' v klíči 'pr_reviewers'"
-        continue
-      fi
-      _pr_seen["$_item"]=1
+  _value="${_GH_CONF[projects/$_pk/pr_reviewers_team]:-}"
+  if [[ -n "$_value" ]]; then
+    if [[ "$_value" == *,* ]]; then
+      _gh-conf-err "$2" "$_rel" "klíč 'pr_reviewers_team' musí být jediný tým bez čárek (je '$_value')"
+    elif ! _gh-match "$_value" "$_GH_CONF_NAME_REGEX"; then
+      _gh-conf-err "$2" "$_rel" "nevalidní slug týmu '$_value' v klíči 'pr_reviewers_team'"
+    else
+      _teams=",${_GH_CONF[projects/$_pk/repository_teams]:-},"
       _has_write=0
       for _perm in $_GH_CONF_PR_REVIEWERS_PERMS; do
-        [[ "$_teams" == *",$_item|$_perm,"* ]] && { _has_write=1; break; }
+        [[ "$_teams" == *",$_value|$_perm,"* ]] && { _has_write=1; break; }
       done
       [[ $_has_write -eq 1 ]] || _gh-conf-err "$2" "$_rel" \
-        "tým '$_item' v klíči 'pr_reviewers' není v repository_teams s právem push/write/maintain/admin (CODEOWNERS vlastníka bez write GitHub ignoruje)"
-    done
+        "tým '$_value' v klíči 'pr_reviewers_team' není v repository_teams s právem push/write/maintain/admin (CODEOWNERS vlastníka bez write GitHub ignoruje)"
+    fi
   fi
   _value="${_GH_CONF[projects/$_pk/repository_creators]:-}"
   [[ -z "$_value" ]] || _gh-conf-validate-csv "$_value" "$_GH_CONF_NAME_REGEX" "$_rel" repository_creators "$2"

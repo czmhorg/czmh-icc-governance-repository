@@ -12,7 +12,7 @@
 # lib/gh-governance-report.sh, lib/gh-governance-manifest.sh (rebuild),
 # lib/gh-governance-issue.sh (track-delete sweep; jen v GitHub Actions),
 # lib/gh-governance-deploy-manifest.sh (kontrola driftu kódu),
-# lib/gh-governance-codeowners.sh (správa CODEOWNERS dle pr_reviewers).
+# lib/gh-governance-codeowners.sh (správa CODEOWNERS dle pr_reviewers_team).
 [[ -n "${_GH_GOVERNANCE_RECONCILE_LOADED:-}" ]] && \
   declare -F _gh-governance-classify >/dev/null && return 0
 _GH_GOVERNANCE_RECONCILE_LOADED=1
@@ -500,7 +500,7 @@ _gh-governance-reconcile-run() {
               "${GITHUB_ORG}/${_name}" "$(tail -n 1 "$_err_file")"
           fi
           rm -f "$_err_file"
-          # Správa CODEOWNERS dle pr_reviewers — nezávislá na výsledku
+          # Správa CODEOWNERS dle pr_reviewers_team — nezávislá na výsledku
           # reconciliace repa, vlastní tolerance selhání.
           _err_file=$(mktemp) || return 1
           if ! _gh-governance-reconcile-codeowners "$_name" "$_branch" "$_key" \
