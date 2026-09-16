@@ -25,8 +25,10 @@ nastavení, aniž by cokoli musel kdokoli nastavovat ručně:
 
 ## Co je v tomto repozitáři
 
-- `conf.d/` — **jediné místo pravdy** konfigurace: projekty, business
-  services, domény a profily ochrany větví; mění se výhradně pull requestem,
+- `conf.d/` — **jediné místo pravdy** konfigurace: projekty, nastavení
+  jednotlivých rep (`projects/<projekt>/<repo>.conf` — jiná ochrana větví
+  nebo týmy navíc pro jedno repo), business services, domény a profily
+  ochrany větví; mění se výhradně pull requestem,
 - `state/` — stavové soubory automatiky; zapisuje výhradně governance bot,
 - `splits/` — mapy hromadného rozdělení projektů (schvalované pull requestem),
 - `.github/workflows/`, `bin/`, `lib/` — kód automatiky; nasazuje se sem

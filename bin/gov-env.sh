@@ -76,8 +76,10 @@ _gov-entry-main() {
   #   <projectKey> <ghName>                       lokální aplikační cesta,
   #   --parse                                     parse job (issue event),
   #   --execute <projectKey> <ghName> <issueNum>  execute job (komentář+close).
+  # Komentář close u new-repository doplní řádek o použitém nastavení repa
+  # (defs/defs.md – nastavení repa; jen když soubor existuje).
   # Použití: _gov-entry-main <op_funkce> <auth_klíč> <hláška úspěchu> [args...]
-  local _op="$1" _field="$2" _success_label="$3" _a _mode=local _url
+  local _op="$1" _field="$2" _success_label="$3" _a _mode=local _url _note=""
   shift 3
   local -a _pos=()
   for _a in "$@"; do
@@ -103,7 +105,9 @@ _gov-entry-main() {
       fi
       if "$_op" "${_pos[0]}" "${_pos[1]}"; then
         _url="https://${GITHUB_ORG_HOSTNAME}/${GITHUB_ORG}/$(_gh-governance-repo-name "${_pos[0]}" "${_pos[1]}")"
-        _gh-governance-issue-close-done "${_pos[2]}" "$_success_label: $_url"
+        [[ "$_op" == _gh-governance-new ]] && \
+          _note=$(_gh-governance-repo-settings-note "${_pos[0]}" "${_pos[1]}" used)
+        _gh-governance-issue-close-done "${_pos[2]}" "$_success_label: $_url${_note:+$'\n'$_note}"
       else
         # Provozní selhání: issue zůstává otevřené, workflow spadne (viditelnost).
         GH_HOST="$GITHUB_ORG_HOSTNAME" gh issue comment "${_pos[2]}" \

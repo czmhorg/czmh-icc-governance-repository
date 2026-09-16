@@ -157,17 +157,20 @@ _gh-governance-reconcile-repo() {
   # ukazatele → zápis ukazatele do checkoutu (commit+push dělá běh jednou na
   # konci) → warningy „tým/ruleset/collaborator přiřazený navíc" → položky
   # reportu (adopce, opravený drift, ruční změna MHN).
+  # <ghName> = efektivní konfigurace repa (nastavení repa přepisuje projekt);
+  # volající ho odřízne z názvu (tvar <prefix>-<key>-<ghName> garantuje
+  # klasifikace).
   # rc != 0 → volající reportuje „neuspesna reconciliace repa" a pokračuje.
-  # Použití: _gh-governance-reconcile-repo <repoName> <branch> <projectKey>
-  local _name="$1" _branch="$2" _key="$3"
-  local _repo_path="${GITHUB_ORG}/${_name}" _result="" _detail="" _adopted=false
+  # Použití: _gh-governance-reconcile-repo <repoName> <branch> <projectKey> <ghName>
+  local _name="$1" _branch="$2" _key="$3" _gh_name="$4"
+  local _repo_path="${GITHUB_ORG}/${_name}" _result="" _detail="" _adopted=false _settings_keys=""
   local _expected _observed _listing _team _permission _id _rsname _login _role
   local _expected_mhn _mhn_observed="" _dt_observed="" _pointer_sha="" _adoption_props=""
   local _removed_login=""
   local -a _removed=()
   local -A _expected_map=()
 
-  _gh-repository-policy-check "$_repo_path" "$_branch" "$_key" _result _detail
+  _gh-repository-policy-check "$_repo_path" "$_branch" "$_key" "$_gh_name" _result _detail
   if [[ "$_result" == ERROR ]]; then
     echo "Chyba: Policy check repa '$_repo_path' selhal ($_detail)." >&2
     return 1
@@ -178,15 +181,16 @@ _gh-governance-reconcile-repo() {
   _gh-repository-policy-properties-read "$_repo_path" _mhn_observed _dt_observed || return 1
   _pointer_sha=$(_gh-governance-state-read "$_name" 2>/dev/null) || _pointer_sha=""
 
-  _gh-governance-apply-policy-and-state "$_repo_path" "$_name" "$_branch" "$_key" \
+  _gh-governance-apply-policy-and-state "$_repo_path" "$_name" "$_branch" "$_key" "$_gh_name" \
     _removed _adopted _removed_login || return 1
 
   # Warningy se zjišťují až po aplikaci a odebrání – popisují stav na konci
   # běhu (tým odebraný tímto během dle diffu není „přiřazený navíc").
 
-  # Warning: tým přiřazený navíc (ručně přiřazený nad rámec repository_teams;
+  # Warning: tým přiřazený navíc (ručně přiřazený nad rámec efektivních týmů
+  # repa = repository_teams projektu ∪ repository_teams_add nastavení repa;
   # neodebírá se – v žádné verzi konfigurace nebyl, v diffu se neobjeví).
-  _expected=$(_gh-repository-policy-expected-teams "$_key") || return 1
+  _expected=$(_gh-repository-policy-expected-teams "$_key" "$_gh_name") || return 1
   while IFS=$'\t' read -r _team _permission; do
     [[ -n "$_team" ]] && _expected_map["$_team"]=1
   done <<< "$_expected"
@@ -210,7 +214,7 @@ _gh-governance-reconcile-repo() {
   # bota a Jenkins login aktuální domény; neodebírá se – úklid na vyžádání
   # tools/remove-extra-collaborators.sh). Jenkins login staré domény odebral
   # tento běh dle diffu ukazatele výše, takže se tu už neobjeví.
-  _listing=$(_gh-repository-policy-extra-collaborators-list "$_repo_path" "$_key") || return 1
+  _listing=$(_gh-repository-policy-extra-collaborators-list "$_repo_path" "$_key" "$_gh_name") || return 1
   while IFS=$'\t' read -r _login _role; do
     [[ -n "$_login" ]] && _gh-governance-report-add warning "collaborator prirazeny navic" \
       "$_repo_path" "collaborator '$_login' ($_role)"
@@ -219,8 +223,11 @@ _gh-governance-reconcile-repo() {
   _gh-governance-reconcile-properties-report "$_repo_path" "$_key" "$_mhn_observed" \
     "$_expected_mhn" "$_dt_observed" "$_pointer_sha" "$_adopted" _adoption_props
   if [[ "$_adopted" == true ]]; then
+    # Má-li repo nastavení repa, detail uvede jeho klíče (defs/defs.md,
+    # položka adopce repa); týmy z repository_teams_add jsou v detailu checku.
+    _gh-conf-repo-settings-keys "$_key" "$_gh_name" _settings_keys
     _gh-governance-report-add info "adopce repa" "$_repo_path" \
-      "ukazatel založen; zjištěné rozdíly: ${_detail:--}${_adoption_props:+; $_adoption_props}"
+      "ukazatel založen; zjištěné rozdíly: ${_detail:--}${_adoption_props:+; $_adoption_props}${_settings_keys:+; nastavení repa: ${_settings_keys// /, }}"
   elif [[ "$_result" == DIFF ]]; then
     # Rozdíl v property hlásí specifická položka výše; generické info zůstává
     # pro ostatní detaily (policy check hlásí první rozdíl v pořadí checků).
@@ -254,6 +261,26 @@ _gh-governance-reconcile-dead-pointers() {
     [[ -f "$_file" ]] || continue
     _name="${_file##*/}"
     [[ -v _org_repos["$_name"] ]] || printf '%s\n' "$_name"
+  done
+  return 0
+}
+
+_gh-governance-reconcile-orphan-settings() {
+  # Vypíše nastavení repa (načtená _GH_CONF_REPO_SETTINGS, pořadí globu),
+  # jejichž repo <prefix>-<key>-<ghName> není ve výpisu rep organizace
+  # (nastavení bez repa: připravené předem, smazané, přesunuté, přejmenované)
+  # po řádcích "<repoName>\t<key>\t<ghName>". Archivované repo je ve výpisu,
+  # tedy nastavení má. Čistá offline funkce (vzor -dead-pointers).
+  # Použití: _gh-governance-reconcile-orphan-settings <listing_file>
+  local _listing_file="$1" _item _name _rest
+  local -A _org_repos=()
+  while IFS=$'\t' read -r _name _rest; do
+    [[ -n "$_name" ]] && _org_repos["$_name"]=1
+  done < "$_listing_file"
+  for _item in "${_GH_CONF_REPO_SETTINGS[@]}"; do
+    _name="${GH_REPO_PREFIX}-${_item%%/*}-${_item#*/}"
+    [[ -v _org_repos["$_name"] ]] || \
+      printf '%s\t%s\t%s\n' "$_name" "${_item%%/*}" "${_item#*/}"
   done
   return 0
 }
@@ -458,7 +485,7 @@ _gh-governance-reconcile-run() {
   # Použití: _gh-governance-reconcile-run
   local _listing _name _archived _branch _topics _extra _class _value _err_file
   local _key _n _level _subset _listing_file _dead _manifest_added=0 _manifest_removed=0
-  local _pointer
+  local _pointer _gh_name
   local -A _count_archived=() _count_live=()
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX GH_PROJECT_TOPIC_PREFIX || return 1
   _gh-governance-run-sha >/dev/null || return 1
@@ -494,8 +521,10 @@ _gh-governance-reconcile-run() {
           # Ukazatel před aplikací policy (posune ho reconcile-repo) — správa
           # CODEOWNERS z něj odvozuje úroveň hlášení při přepisu sekce.
           _pointer=$(_gh-governance-state-read "$_name" 2>/dev/null) || _pointer=""
+          # ghName odříznutím z názvu (tvar garantuje klasifikace spravovane).
+          _gh_name="${_name#"${GH_REPO_PREFIX}-${_key}-"}"
           _err_file=$(mktemp) || return 1
-          if ! _gh-governance-reconcile-repo "$_name" "$_branch" "$_key" 2>"$_err_file"; then
+          if ! _gh-governance-reconcile-repo "$_name" "$_branch" "$_key" "$_gh_name" 2>"$_err_file"; then
             _gh-governance-report-add error "neuspesna reconciliace repa" \
               "${GITHUB_ORG}/${_name}" "$(tail -n 1 "$_err_file")"
           fi
@@ -555,6 +584,14 @@ _gh-governance-reconcile-run() {
     _gh-governance-report-add warning "mrtvy ukazatel state" "$_dead" \
       "ukazatel state/ existuje, repo v organizaci ne (smazání minulo track-delete)"
   done <<< "$(_gh-governance-reconcile-dead-pointers "$_listing_file")"
+
+  # Nastavení bez repa (conf.d/projects/<key>/<ghName>.conf bez repa
+  # v organizaci): jen hlášení, soubor se neodstraňuje (viz defs/defs.md).
+  while IFS=$'\t' read -r _name _key _gh_name; do
+    [[ -n "$_name" ]] || continue
+    _gh-governance-report-add warning "nastaveni bez repa" "${GITHUB_ORG}/${_name}" \
+      "conf.d/projects/${_key}/${_gh_name}.conf existuje, repo v organizaci ne (připravené předem, smazané, přesunuté nebo přejmenované)"
+  done <<< "$(_gh-governance-reconcile-orphan-settings "$_listing_file")"
 
   # Pojistka za track-delete (guard na GitHub Actions je uvnitř).
   _gh-governance-track-delete-sweep "$_listing_file" || \

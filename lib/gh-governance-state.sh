@@ -7,7 +7,7 @@
 # byla na repo naposledy úspěšně aplikována. Modul pracuje nad lokálním
 # checkoutem gov repa (kořen = rodič adresáře conf.d, viz _GH_COMMON_CONF_D).
 # Závislosti: gh-common-defs.sh (_GH_COMMON_CONF_D, _GH_CONF, _require_vars),
-# lib/gh-conf.sh (_gh-conf-parse-file), lib/gh-repository-policy.sh
+# lib/gh-conf.sh (_gh-conf-parse-file, _gh-conf-effective), lib/gh-repository-policy.sh
 # (_gh-validate-admin-team, _gh-jenkins-delete, _gh-jenkins-policy-resolve,
 #  _gh-repository-policy-live-admin-removal-safe).
 [[ -n "${_GH_GOVERNANCE_STATE_LOADED:-}" ]] && \
@@ -138,7 +138,8 @@ _gh-governance-conf-file-at-commit() {
   # Načte jeden soubor conf.d ve verzi daného commitu gov repa do _GH_CONF pod
   # izolovaný namespace "at-<sha>" (klíče at-<sha>/<název>/<pole>). Starou
   # verzi čte přes `git show` a parsuje reuse _gh-conf-parse-file (žádný
-  # druhý parser); dřívější klíče téhož názvu v namespace nejdřív smaže.
+  # druhý parser); dřívější klíče téhož názvu v namespace nejdřív smaže
+  # (přes index _GH_CONF_KEYS — jen klíče toho souboru, ne průchod _GH_CONF).
   # rc: 0 = načteno, 1 = soubor v té verzi neexistuje, 2 = chyba (git/parsování).
   # Použití: _gh-governance-conf-file-at-commit <sha> <cesta pod conf.d> <název>
   local _sha="$1" _rel="$2" _name="$3" _root _content _tmp _k
@@ -147,9 +148,10 @@ _gh-governance-conf-file-at-commit() {
   _content=$(git -C "$_root" show "$_sha:conf.d/$_rel" 2>/dev/null) || return 1
   _tmp=$(mktemp) || return 2
   printf '%s\n' "$_content" > "$_tmp"
-  for _k in "${!_GH_CONF[@]}"; do
-    [[ "$_k" == "at-$_sha/$_name/"* ]] && unset "_GH_CONF[$_k]"
+  for _k in ${_GH_CONF_KEYS[at-$_sha/$_name]:-}; do
+    unset "_GH_CONF[at-$_sha/$_name/$_k]"
   done
+  unset "_GH_CONF_KEYS[at-$_sha/$_name]"
   _gh-conf-parse-file "$_tmp" "$_rel@$_sha" "at-$_sha" "$_name" _errs
   rm -f "$_tmp"
   if [[ ${#_errs[@]} -gt 0 ]]; then
@@ -162,10 +164,38 @@ _gh-governance-conf-file-at-commit() {
 
 _gh-governance-conf-project-at-commit() {
   # Načte projects/<projectKey>.conf ve verzi commitu (klíče
-  # at-<sha>/<projectKey>/<pole>). rc 0 = načteno, 1 = soubor v té verzi
-  # neexistuje, 2 = chyba.
+  # at-<sha>/projects/<projectKey>/<pole> — stejný tvar jako živá konfigurace,
+  # aby _gh-conf-effective fungovala s prefixem namespace). rc 0 = načteno,
+  # 1 = soubor v té verzi neexistuje, 2 = chyba.
   # Použití: _gh-governance-conf-project-at-commit <sha> <projectKey>
-  _gh-governance-conf-file-at-commit "$1" "projects/$2.conf" "$2"
+  _gh-governance-conf-file-at-commit "$1" "projects/$2.conf" "projects/$2"
+}
+
+_gh-governance-conf-repo-at-commit() {
+  # Načte nastavení repa projects/<projectKey>/<ghName>.conf ve verzi commitu
+  # (klíče at-<sha>/repos/<projectKey>/<ghName>/<pole>). rc 1 = soubor v té
+  # verzi neexistuje → platila konfigurace projektu. rc 2 = chyba.
+  # Použití: _gh-governance-conf-repo-at-commit <sha> <projectKey> <ghName>
+  _gh-governance-conf-file-at-commit "$1" "projects/$2/$3.conf" "repos/$2/$3"
+}
+
+_gh-governance-conf-effective-at-commit() {
+  # Načte projekt i nastavení repa ve verzi commitu (prázdný <ghName> = jen
+  # projekt) a naplní nameref efektivní hodnotou pole přes _gh-conf-effective
+  # s namespace at-<sha>. Soubory v dané verzi nemusí existovat → hodnota
+  # prázdná (rc 0). rc 1 = chyba (git/parsování) – volající nesmí nic měnit.
+  # Použití: _gh-governance-conf-effective-at-commit <sha> <projectKey> <ghName> <pole> <out_ref>
+  local _sha="$1" _key="$2" _gh_name="$3" _field="$4"
+  declare -n _ceac_ref="$5"
+  _ceac_ref=""
+  _gh-governance-conf-project-at-commit "$_sha" "$_key"
+  [[ $? -ne 2 ]] || return 1
+  if [[ -n "$_gh_name" ]]; then
+    _gh-governance-conf-repo-at-commit "$_sha" "$_key" "$_gh_name"
+    [[ $? -ne 2 ]] || return 1
+  fi
+  _gh-conf-effective "$_key" "$_gh_name" "$_field" "$5" "at-$_sha"
+  return 0
 }
 
 _gh-governance-conf-domain-at-commit() {
@@ -175,7 +205,7 @@ _gh-governance-conf-domain-at-commit() {
   local _sha="$1" _key="$2"
   _gh-governance-conf-project-at-commit "$_sha" "$_key"
   case $? in
-    0) printf '%s\n' "${_GH_CONF[at-$_sha/$_key/domain]:-}" ;;
+    0) printf '%s\n' "${_GH_CONF[at-$_sha/projects/$_key/domain]:-}" ;;
     1) ;;
     *) return 2 ;;
   esac
@@ -216,7 +246,8 @@ _gh-governance-jenkins-to-remove-between() {
   _new=$(_gh-governance-conf-jenkins-at-commit "$_new_sha" "$_new_key") || return 1
   [[ -n "$_old" ]] || return 0
   [[ "${_old,,}" != "${_new,,}" ]] || return 0
-  _gh-jenkins-policy-resolve "$_new_key" _current _configured _decision || return 1
+  # Jen login aktuální domény (nezávisí na nastavení repa) — bez ghName.
+  _gh-jenkins-policy-resolve "$_new_key" "" _current _configured _decision || return 1
   [[ "${_old,,}" != "${_current,,}" ]] || return 0
   [[ "${_old,,}" != "${GH_GOVERNANCE_BOT_USER,,}" ]] || return 0
   _rm_login_ref="$_old"
@@ -231,21 +262,18 @@ _gh-governance-jenkins-to-remove() {
 }
 
 _gh-governance-conf-teams-at-commit() {
-  # Naplní nameref pole slugy týmů z klíče repository_teams projektu ve verzi
-  # konfigurace daného commitu gov repa (_gh-governance-conf-project-at-commit).
-  # Soubor v dané verzi nemusí existovat → prázdný seznam (rc 0).
+  # Naplní nameref pole slugy efektivních týmů repa (repository_teams projektu
+  # + repository_teams_add nastavení repa; prázdný <ghName> = jen projekt) ve
+  # verzi konfigurace daného commitu gov repa. Soubory v dané verzi nemusí
+  # existovat → prázdný seznam (rc 0).
   # rc: 0 = OK, 1 = chyba (git/parsování) – volající nesmí nic odebírat.
-  # Použití: local -a _t=(); _gh-governance-conf-teams-at-commit <sha> <projectKey> _t
-  local _sha="$1" _key="$2" _rest _item
-  declare -n _teams_ref="$3"
+  # Použití: local -a _t=(); _gh-governance-conf-teams-at-commit <sha> <projectKey> <ghName> _t
+  local _sha="$1" _key="$2" _gh_name="$3" _rest="" _item
+  declare -n _teams_ref="$4"
   _teams_ref=()
-  _gh-governance-conf-project-at-commit "$_sha" "$_key"
-  case $? in
-    0) ;;
-    1) return 0 ;;
-    *) return 1 ;;
-  esac
-  _rest="${_GH_CONF[at-$_sha/$_key/repository_teams]:-},"
+  _gh-governance-conf-effective-at-commit "$_sha" "$_key" "$_gh_name" repository_teams _rest \
+    || return 1
+  _rest+=","
   while [[ "$_rest" == *,* ]]; do
     _item="${_rest%%,*}"
     _rest="${_rest#*,}"
@@ -255,22 +283,25 @@ _gh-governance-conf-teams-at-commit() {
 }
 
 _gh-governance-teams-to-remove-between() {
-  # Naplní nameref pole týmy k odebrání: {týmy v repository_teams projektu
-  # oldKey na SHA old_sha} − {týmy projektu newKey na SHA new_sha}.
-  # Jednoklíčové volání (oldKey == newKey) je diff ukazatel→RUN_SHA v rámci
-  # projektu; dvouklíčové přesun repa mezi projekty (move-repository).
-  # Pojistka: tým z aktuálně načteného repository_teams projektu newKey
-  # (_GH_CONF) se do seznamu nikdy nedostane.
-  # Použití: local -a _rm=(); _gh-governance-teams-to-remove-between <oldKey> <old_sha> <newKey> <new_sha> _rm
-  local _old_key="$1" _old_sha="$2" _new_key="$3" _new_sha="$4"
-  local _team _new_csv _current
-  declare -n _rm_ref="$5"
+  # Naplní nameref pole týmy k odebrání: {efektivní týmy repa oldKey/oldGhName
+  # na SHA old_sha} − {efektivní týmy repa newKey/newGhName na SHA new_sha}
+  # (defs/defs-governance-repo.md, diff ukazatele). Jednoklíčové volání
+  # (oldKey == newKey, týž ghName) je diff ukazatel→RUN_SHA v rámci projektu;
+  # dvouklíčové přesun repa mezi projekty (move-repository).
+  # Pojistka: tým z aktuálně načtené efektivní konfigurace repa
+  # newKey/newGhName (_GH_CONF) se do seznamu nikdy nedostane.
+  # Použití: local -a _rm=(); _gh-governance-teams-to-remove-between <oldKey> <old_sha> <oldGhName> <newKey> <new_sha> <newGhName> _rm
+  local _old_key="$1" _old_sha="$2" _old_gh_name="$3"
+  local _new_key="$4" _new_sha="$5" _new_gh_name="$6"
+  local _team _new_csv _current=""
+  declare -n _rm_ref="$7"
   local -a _old_teams=() _new_teams=()
   _rm_ref=()
-  _gh-governance-conf-teams-at-commit "$_old_sha" "$_old_key" _old_teams || return 1
-  _gh-governance-conf-teams-at-commit "$_new_sha" "$_new_key" _new_teams || return 1
+  _gh-governance-conf-teams-at-commit "$_old_sha" "$_old_key" "$_old_gh_name" _old_teams || return 1
+  _gh-governance-conf-teams-at-commit "$_new_sha" "$_new_key" "$_new_gh_name" _new_teams || return 1
   _new_csv=",$(IFS=,; echo "${_new_teams[*]-}"),"
-  _current=",${_GH_CONF[projects/$_new_key/repository_teams]:-},"
+  _gh-conf-effective "$_new_key" "$_new_gh_name" repository_teams _current
+  _current=",$_current,"
   for _team in "${_old_teams[@]}"; do
     # ghOrgSecurityManagersTeam se nikdy neodebírá (implicitní součást politiky;
     # v historické konfiguraci se mohl vyskytnout před zákazem v repository_teams).
@@ -284,20 +315,21 @@ _gh-governance-teams-to-remove-between() {
 
 _gh-governance-teams-to-remove() {
   # Jednoklíčová zkratka _gh-governance-teams-to-remove-between (diff
-  # ukazatel→RUN_SHA v rámci téhož projektu).
-  # Použití: local -a _rm=(); _gh-governance-teams-to-remove <projectKey> <pointer_sha> <run_sha> _rm
-  _gh-governance-teams-to-remove-between "$1" "$2" "$1" "$3" "$4"
+  # ukazatel→RUN_SHA v rámci téhož projektu a repa).
+  # Použití: local -a _rm=(); _gh-governance-teams-to-remove <projectKey> <ghName> <pointer_sha> <run_sha> _rm
+  _gh-governance-teams-to-remove-between "$1" "$3" "$2" "$1" "$4" "$2" "$5"
 }
 
 _gh-governance-teams-remove() {
   # Odebere z repa týmy z nameref pole (volat až po úspěšném kompletním
-  # assignu politiky). Pojistky: tým z aktuálního repository_teams se nikdy
-  # neodebírá; před odebráním týmu s živým admin právem ověří, že na repu
-  # zůstává jiný admin tým; DELETE 404-tolerantně. Odebrané týmy vypisuje
-  # po řádcích na stdout (podklad pro report).
-  # Použití: _gh-governance-teams-remove <repo_path> <projectKey> <teams_array_name>
-  local _repo_path="$1" _key="$2" _team _permission _observed _current
-  declare -n _rm_teams_ref="$3"
+  # assignu politiky). Pojistky: tým z aktuální efektivní konfigurace repa
+  # (repository_teams projektu + repository_teams_add) se nikdy neodebírá;
+  # před odebráním týmu s živým admin právem ověří, že na repu zůstává jiný
+  # admin tým; DELETE 404-tolerantně. Odebrané týmy vypisuje po řádcích na
+  # stdout (podklad pro report).
+  # Použití: _gh-governance-teams-remove <repo_path> <projectKey> <ghName> <teams_array_name>
+  local _repo_path="$1" _key="$2" _gh_name="$3" _team _permission _observed _current=""
+  declare -n _rm_teams_ref="$4"
   local -A _live=()
   [[ ${#_rm_teams_ref[@]} -gt 0 ]] || return 0
   _gh-validate-admin-team "$_key" GITHUB_REPO_TEAMS || return 1
@@ -307,7 +339,8 @@ _gh-governance-teams-remove() {
   while IFS=$'\t' read -r _team _permission; do
     [[ -n "$_team" ]] && _live["$_team"]="$_permission"
   done <<< "$_observed"
-  _current=",${_GH_CONF[projects/$_key/repository_teams]:-},"
+  _gh-conf-effective "$_key" "$_gh_name" repository_teams _current
+  _current=",$_current,"
   for _team in "${_rm_teams_ref[@]}"; do
     [[ "$_current" == *",$_team|"* ]] && continue
     [[ -v _live["$_team"] ]] || continue

@@ -1,15 +1,16 @@
 #!/bin/bash
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
-# Bezpečný parser INI konfigurace conf.d/ (projects/, business-services/,
-# domains/, profiles/).
+# Bezpečný parser INI konfigurace conf.d/ (projects/, projects/<key>/ —
+# nastavení jednotlivých rep, business-services/, domains/, profiles/).
 # Načítá soubory klíč=hodnota do asociativního pole _GH_CONF bez sourcování.
 # Formát a pravidla: docs/readme/README_COMMON.md (sekce Konfigurace projektů).
 # Běží při každém startu shellu (source z gh-common-defs.sh) – v load path
 # jsou povoleny pouze bash builtiny, žádné spouštění externích procesů.
 # Závislosti z gh-common-defs.sh (definovány před sourcováním tohoto modulu):
-# _gh-match (sám je jen builtin [[ =~ ]] s lokálním LC_ALL=C) a konfigurační
-# proměnné GH_GOVERNANCE_REPO + GH_REPO_PREFIX (rezervovaný projectKey).
+# _gh-match (sám je jen builtin [[ =~ ]] s lokálním LC_ALL=C), _GH_GHNAME_REGEX
+# (názvy souborů nastavení repa) a konfigurační proměnné GH_GOVERNANCE_REPO +
+# GH_REPO_PREFIX (rezervovaný projectKey), GH_SECURITY_MANAGERS_TEAM.
 [[ -n "${_GH_CONF_LOADED:-}" ]] && \
   declare -F _gh-conf-load >/dev/null && return 0
 _GH_CONF_LOADED=1
@@ -18,11 +19,33 @@ _GH_CONF_LOADED=1
 declare -gA _GH_CONF=()
 # Seznam ghProjectKey v pořadí globu projects/*.conf (pro _bb_all_project_keys).
 declare -ga _GH_CONF_PROJECT_KEYS=()
+# Index klíčů per soubor: _GH_CONF_KEYS["<ns>/<název>"] = mezerami oddělené
+# klíče souboru v pořadí řádků (položka existuje i pro soubor bez klíčů).
+# Plní ho parser, validátory a úklid namespace at-<sha> díky němu procházejí
+# jen klíče daného souboru místo celého _GH_CONF (kvadratické při stovkách
+# souborů; docs/navrh/nastaveni-repa.md, Výkon).
+declare -gA _GH_CONF_KEYS=()
+# Nastavení jednotlivých rep (defs/defs.md, nastavení repa): položky
+# "<key>/<ghName>" v pořadí globu projects/<key>/<ghName>.conf; klíče leží
+# pod namespace repos/<key>/<ghName>/<pole> (ne pod projects/<key>/…, kde by
+# kolidovaly s kontrolou neznámých klíčů projektu a s repem jménem 'rulesets').
+declare -ga _GH_CONF_REPO_SETTINGS=()
 
 # Pole profilu = branch protection API (názvy BRANCH_PROTECT_* malými bez prefixu).
 _GH_CONF_PROFILE_FIELDS="required_status_checks enforce_admins dismiss_stale_reviews require_code_owner_reviews required_approving_review_count restrictions allow_force_pushes allow_deletions required_linear_history"
 _GH_CONF_PROFILE_BOOL_FIELDS="enforce_admins dismiss_stale_reviews require_code_owner_reviews allow_force_pushes allow_deletions required_linear_history"
+# Nepovinná pole profilu (bool): require_pull_request=false = ruleset bez
+# pravidla pull_request (defs/defs.md, policy profile). Záměrně mimo
+# _GH_CONF_PROFILE_FIELDS — ten iteruje i _gh-ruleset-payload jako povinná pole.
+_GH_CONF_PROFILE_OPT_FIELDS="require_pull_request"
 _GH_CONF_PROJECT_FIELDS="display_name domain rulesets repository_teams repository_creators repository_archivers"
+# Klíče, které smí obsahovat nastavení repa (rulesets a pr_reviewers_team
+# přepisují hodnotu projektu, repository_teams_add přidává týmy).
+_GH_CONF_REPO_FIELDS="rulesets pr_reviewers_team repository_teams_add"
+# Rezervovaná hodnota: v rulesets = žádné rulesety mh-policy-* (položka musí
+# být jediná, profiles/none.conf je chyba); v pr_reviewers_team nastavení repa
+# = žádný tým (v projektu chyba).
+_GH_CONF_NONE=none
 # Nepovinná pole projektu; přítomný klíč musí mít neprázdnou hodnotu.
 _GH_CONF_PROJECT_OPT_FIELDS="description pr_reviewers_team"
 # Práva v repository_teams zajišťující write — CODEOWNERS vlastníka bez write
@@ -48,10 +71,12 @@ _gh-conf-err() {
 }
 
 _gh-conf-parse-file() {
-  # Naparsuje jeden soubor klíč=hodnota do _GH_CONF pod prefix <ns>/<název>/.
+  # Naparsuje jeden soubor klíč=hodnota do _GH_CONF pod prefix <ns>/<název>/
+  # a jeho klíče zapíše do indexu _GH_CONF_KEYS["<ns>/<název>"].
   # Ořezává koncové \r (CRLF), čte i poslední řádek bez koncového newline.
   # Použití: _gh-conf-parse-file <soubor> <relativní cesta> <ns> <název> <errors_ref>
   local _file="$1" _rel="$2" _ns="$3" _name="$4" _line _key _value _lineno=0
+  _GH_CONF_KEYS["$_ns/$_name"]=""
   while IFS= read -r _line || [[ -n "$_line" ]]; do
     (( _lineno++ ))
     _line="${_line%$'\r'}"
@@ -75,6 +100,7 @@ _gh-conf-parse-file() {
       continue
     fi
     _GH_CONF["$_ns/$_name/$_key"]="$_value"
+    _GH_CONF_KEYS["$_ns/$_name"]+="${_GH_CONF_KEYS[$_ns/$_name]:+ }$_key"
   done < "$_file"
 }
 
@@ -126,6 +152,43 @@ _gh-conf-load-domains() {
   return 0
 }
 
+_gh-conf-load-repos() {
+  # Načte nastavení jednotlivých rep projects/<key>/<ghName>.conf pod namespace
+  # repos/<key>/<ghName> a položky "<key>/<ghName>" sbírá v pořadí globu do
+  # _GH_CONF_REPO_SETTINGS. Fail-loud: adresář bez souboru projektu, jiná
+  # položka v projects/ než <key>.conf nebo adresář a jiný obsah adresáře než
+  # <ghName>.conf jsou chyby (starší parser podadresáře tiše ignoroval).
+  # Soubory *.conf v projects/ řeší _gh-conf-load-ns.
+  # Použití: _gh-conf-load-repos <confd_root> <errors_ref> <projects_seen_ref>
+  local _root="$1" _entry _key _f _base _gh_name
+  declare -n _lr_projects="$3"
+  for _entry in "$_root/projects"/*; do
+    [[ -e "$_entry" || -L "$_entry" ]] || continue
+    _key="${_entry##*/}"
+    if [[ -f "$_entry" && ! -L "$_entry" && "$_key" == *.conf ]]; then
+      continue
+    elif [[ ! -d "$_entry" || -L "$_entry" ]]; then
+      _gh-conf-err "$2" "projects/$_key" "neočekávaná položka (povoleny jen soubory <ghProjectKey>.conf a adresáře nastavení rep <ghProjectKey>/)"
+      continue
+    elif [[ ! -v _lr_projects["$_key"] ]]; then
+      _gh-conf-err "$2" "projects/$_key/" "adresář nastavení rep bez souboru projects/$_key.conf"
+      continue
+    fi
+    for _f in "$_entry"/*; do
+      [[ -e "$_f" || -L "$_f" ]] || continue
+      _base="${_f##*/}"
+      _gh_name="${_base%.conf}"
+      if [[ ! -f "$_f" || -L "$_f" || "$_base" != *.conf ]] || ! _gh-match "$_gh_name" "$_GH_GHNAME_REGEX"; then
+        _gh-conf-err "$2" "projects/$_key/$_base" "neočekávaná položka (povoleny jen soubory nastavení repa <ghName>.conf, ghName dle $_GH_GHNAME_REGEX)"
+        continue
+      fi
+      _gh-conf-parse-file "$_f" "projects/$_key/$_base" repos "$_key/$_gh_name" "$2"
+      _GH_CONF_REPO_SETTINGS+=("$_key/$_gh_name")
+    done
+  done
+  return 0
+}
+
 _gh-conf-validate-csv() {
   # Ověří CSV hodnotu: žádné prázdné položky, každá položka odpovídá regexu.
   # Použití: _gh-conf-validate-csv <hodnota> <regex> <relativní cesta> <klíč> <errors_ref>
@@ -146,9 +209,17 @@ _gh-conf-validate-csv() {
 
 _gh-conf-validate-policy-fields() {
   # Zvaliduje pole ochrany větve pod prefixem <ns/název> v _GH_CONF;
-  # všechna pole jsou povinná a neprázdná.
+  # pole _GH_CONF_PROFILE_FIELDS jsou povinná a neprázdná, pole
+  # _GH_CONF_PROFILE_OPT_FIELDS (bool) se validují jen, jsou-li přítomná.
   # Použití: _gh-conf-validate-policy-fields <ns/název> <relativní cesta> <errors_ref>
   local _prefix="$1" _rel="$2" _field _value
+  for _field in $_GH_CONF_PROFILE_OPT_FIELDS; do
+    [[ -v _GH_CONF["$_prefix/$_field"] ]] || continue
+    case "${_GH_CONF[$_prefix/$_field]}" in
+      true|false) ;;
+      *) _gh-conf-err "$3" "$_rel" "klíč '$_field' smí mít jen hodnotu 'true' nebo 'false' (je '${_GH_CONF[$_prefix/$_field]}')" ;;
+    esac
+  done
   for _field in $_GH_CONF_PROFILE_FIELDS; do
     if [[ ! -v _GH_CONF["$_prefix/$_field"] ]]; then
       _gh-conf-err "$3" "$_rel" "chybí povinný klíč '$_field'"
@@ -172,12 +243,10 @@ _gh-conf-validate-policy-fields() {
 _gh-conf-validate-profile() {
   # Zvaliduje profiles/<název>.conf: povinná pole a formáty, neznámé klíče.
   # Použití: _gh-conf-validate-profile <název> <errors_ref>
-  local _name="$1" _rel="profiles/$1.conf" _key _field _value
+  local _name="$1" _rel="profiles/$1.conf" _field _value
   _gh-conf-validate-policy-fields "profiles/$_name" "$_rel" "$2"
-  for _key in "${!_GH_CONF[@]}"; do
-    [[ "$_key" == "profiles/$_name/"* ]] || continue
-    _field="${_key##*/}"
-    [[ " $_GH_CONF_PROFILE_FIELDS $_GH_CONF_PROFILE_RULESET_FIELDS " == *" $_field "* ]] || \
+  for _field in ${_GH_CONF_KEYS[profiles/$_name]:-}; do
+    [[ " $_GH_CONF_PROFILE_FIELDS $_GH_CONF_PROFILE_OPT_FIELDS $_GH_CONF_PROFILE_RULESET_FIELDS " == *" $_field "* ]] || \
       _gh-conf-err "$2" "$_rel" "neznámý klíč '$_field'"
   done
   if [[ ! -v _GH_CONF["profiles/$_name/branches"] ]]; then
@@ -196,14 +265,12 @@ _gh-conf-validate-profile() {
 _gh-conf-validate-bs() {
   # Zvaliduje business-services/<MHN>.conf: povinné klíče, neznámé klíče.
   # Použití: _gh-conf-validate-bs <MHN> <errors_ref>
-  local _mhn="$1" _rel="business-services/$1.conf" _key _field
+  local _mhn="$1" _rel="business-services/$1.conf" _field
   for _field in display_name department; do
     [[ -n "${_GH_CONF[business-services/$_mhn/$_field]:-}" ]] || \
       _gh-conf-err "$2" "$_rel" "chybí povinný klíč '$_field' (nebo má prázdnou hodnotu)"
   done
-  for _key in "${!_GH_CONF[@]}"; do
-    [[ "$_key" == "business-services/$_mhn/"* ]] || continue
-    _field="${_key##*/}"
+  for _field in ${_GH_CONF_KEYS[business-services/$_mhn]:-}; do
     [[ " display_name department " == *" $_field "* ]] || \
       _gh-conf-err "$2" "$_rel" "neznámý klíč '$_field'"
   done
@@ -214,13 +281,11 @@ _gh-conf-validate-domain() {
   # Zvaliduje domains/<MHN>/<typ>.conf: odkaz na business service, neznámé
   # klíče, login. Žádné povinné klíče — prázdný soubor je validní.
   # Použití: _gh-conf-validate-domain <MHN/typ> <errors_ref> <bs_seen_ref>
-  local _domain="$1" _mhn="${1%%/*}" _rel="domains/$1.conf" _key _field _login
+  local _domain="$1" _mhn="${1%%/*}" _rel="domains/$1.conf" _field _login
   declare -n _vd_bs="$3"
   [[ -v _vd_bs["$_mhn"] ]] || \
     _gh-conf-err "$2" "$_rel" "adresář '$_mhn' neodkazuje na existující business-services/$_mhn.conf"
-  for _key in "${!_GH_CONF[@]}"; do
-    [[ "$_key" == "domains/$_domain/"* ]] || continue
-    _field="${_key##*/}"
+  for _field in ${_GH_CONF_KEYS[domains/$_domain]:-}; do
     [[ "$_field" == jenkins_user ]] || \
       _gh-conf-err "$2" "$_rel" "neznámý klíč '$_field'"
   done
@@ -233,13 +298,68 @@ _gh-conf-validate-domain() {
   return 0
 }
 
+_gh-conf-validate-rulesets() {
+  # Zvaliduje hodnotu klíče rulesets (projekt i nastavení repa): formát
+  # položek, odkaz na existující profil, duplicita profilu, atribut |jenkins
+  # jen v doméně s jenkins_user; rezervovaná položka none[|jenkins] (žádné
+  # rulesety) na profil neodkazuje a musí být jediná.
+  # Použití: _gh-conf-validate-rulesets <hodnota> <rel> <domain> <errors_ref> <profiles_seen_ref> <domains_seen_ref>
+  local _value="$1" _rel="$2" _domain="$3" _rest _item _profile
+  local -A _rs_seen=()
+  declare -n _vr_profiles="$5" _vr_domains="$6"
+  _gh-conf-validate-csv "$_value" "$_GH_CONF_RULESET_ITEM_REGEX" "$_rel" rulesets "$4" || return 0
+  _rest="$_value,"
+  while [[ -n "$_rest" ]]; do
+    _item="${_rest%%,*}"
+    _rest="${_rest#*,}"
+    _profile="${_item%%|*}"
+    if [[ "$_profile" == "$_GH_CONF_NONE" ]]; then
+      [[ "$_value" == "$_item" ]] || \
+        _gh-conf-err "$4" "$_rel" "položka '$_item' v klíči 'rulesets' (žádné rulesety) musí být jediná (je '$_value')"
+    elif [[ ! -v _vr_profiles["$_profile"] ]]; then
+      _gh-conf-err "$4" "$_rel" "položka '$_item' v klíči 'rulesets' neodkazuje na existující profiles/$_profile.conf"
+    fi
+    if [[ -v _rs_seen["$_profile"] ]]; then
+      _gh-conf-err "$4" "$_rel" "duplicitní profil '$_profile' v klíči 'rulesets'"
+    fi
+    _rs_seen["$_profile"]=1
+    if [[ "$_item" == *'|jenkins' && -n "$_domain" && -v _vr_domains["$_domain"] && \
+          ! -v _GH_CONF["domains/$_domain/jenkins_user"] ]]; then
+      _gh-conf-err "$4" "$_rel" "položka '$_item' v klíči 'rulesets' má atribut 'jenkins', ale doména '$_domain' nemá klíč 'jenkins_user'"
+    fi
+  done
+  return 0
+}
+
+_gh-conf-validate-pr-reviewers() {
+  # Zvaliduje hodnotu klíče pr_reviewers_team (defs/defs.md): jediný slug
+  # týmu, který je v <teams_csv> (efektivní týmy repa) s právem zajišťujícím
+  # write — CODEOWNERS vlastníka bez write GitHub ignoruje. Hodnota none
+  # (žádný tým) jen s <allow_none>=1 (nastavení repa).
+  # Použití: _gh-conf-validate-pr-reviewers <hodnota> <teams_csv> <rel> <allow_none 0|1> <errors_ref>
+  local _value="$1" _teams=",$2," _rel="$3" _allow_none="$4" _perm _has_write=0
+  if [[ "$_value" == *,* ]]; then
+    _gh-conf-err "$5" "$_rel" "klíč 'pr_reviewers_team' musí být jediný tým bez čárek (je '$_value')"
+  elif [[ "$_value" == "$_GH_CONF_NONE" ]]; then
+    [[ "$_allow_none" == 1 ]] || \
+      _gh-conf-err "$5" "$_rel" "hodnota '$_GH_CONF_NONE' klíče 'pr_reviewers_team' (žádný tým) je povolena jen v nastavení repa; v projektu klíč vynech"
+  elif ! _gh-match "$_value" "$_GH_CONF_NAME_REGEX"; then
+    _gh-conf-err "$5" "$_rel" "nevalidní slug týmu '$_value' v klíči 'pr_reviewers_team'"
+  else
+    for _perm in $_GH_CONF_PR_REVIEWERS_PERMS; do
+      [[ "$_teams" == *",$_value|$_perm,"* ]] && { _has_write=1; break; }
+    done
+    [[ $_has_write -eq 1 ]] || _gh-conf-err "$5" "$_rel" \
+      "tým '$_value' v klíči 'pr_reviewers_team' není v repository_teams s právem push/write/maintain/admin (CODEOWNERS vlastníka bez write GitHub ignoruje)"
+  fi
+  return 0
+}
+
 _gh-conf-validate-project() {
   # Zvaliduje projects/<key>.conf: povinné klíče, neznámé klíče, odkazy, formáty.
   # Použití: _gh-conf-validate-project <key> <errors_ref> <profiles_seen_ref> <domains_seen_ref>
-  local _pk="$1" _rel="projects/$1.conf" _field _key _value _domain _profile _item _rest
-  local _teams _perm _has_write
-  local -A _rs_seen=()
-  declare -n _vp_profiles="$3" _vp_domains="$4"
+  local _pk="$1" _rel="projects/$1.conf" _field _value _domain
+  declare -n _vp_domains="$4"
   for _field in $_GH_CONF_PROJECT_FIELDS; do
     [[ -n "${_GH_CONF[projects/$_pk/$_field]:-}" ]] || \
       _gh-conf-err "$2" "$_rel" "chybí povinný klíč '$_field' (nebo má prázdnou hodnotu)"
@@ -249,9 +369,7 @@ _gh-conf-validate-project() {
       _gh-conf-err "$2" "$_rel" "klíč '$_field' má prázdnou hodnotu"
     fi
   done
-  for _key in "${!_GH_CONF[@]}"; do
-    [[ "$_key" == "projects/$_pk/"* ]] || continue
-    _field="${_key##*/}"
+  for _field in ${_GH_CONF_KEYS[projects/$_pk]:-}; do
     [[ " $_GH_CONF_PROJECT_FIELDS $_GH_CONF_PROJECT_OPT_FIELDS " == *" $_field "* ]] || \
       _gh-conf-err "$2" "$_rel" "neznámý klíč '$_field'"
   done
@@ -272,48 +390,127 @@ _gh-conf-validate-project() {
     [[ ",$_value," != *",${GH_SECURITY_MANAGERS_TEAM}|"* ]] || \
       _gh-conf-err "$2" "$_rel" "repository_teams obsahuje tým '${GH_SECURITY_MANAGERS_TEAM}' — je implicitní součástí politiky a nekonfiguruje se"
   fi
-  # pr_reviewers_team (defs/defs.md): slug jediného týmu pro spravovanou
-  # sekci CODEOWNERS; statická kontrola vazby na repository_teams chytí chybu
-  # už při načtení conf.d (po nasazení i check validate-conf v PR).
+  # pr_reviewers_team (defs/defs.md): statická kontrola vazby na
+  # repository_teams chytí chybu už při načtení conf.d (po nasazení i check
+  # validate-conf v PR); hodnota none je jen pro nastavení repa.
   _value="${_GH_CONF[projects/$_pk/pr_reviewers_team]:-}"
-  if [[ -n "$_value" ]]; then
-    if [[ "$_value" == *,* ]]; then
-      _gh-conf-err "$2" "$_rel" "klíč 'pr_reviewers_team' musí být jediný tým bez čárek (je '$_value')"
-    elif ! _gh-match "$_value" "$_GH_CONF_NAME_REGEX"; then
-      _gh-conf-err "$2" "$_rel" "nevalidní slug týmu '$_value' v klíči 'pr_reviewers_team'"
-    else
-      _teams=",${_GH_CONF[projects/$_pk/repository_teams]:-},"
-      _has_write=0
-      for _perm in $_GH_CONF_PR_REVIEWERS_PERMS; do
-        [[ "$_teams" == *",$_value|$_perm,"* ]] && { _has_write=1; break; }
-      done
-      [[ $_has_write -eq 1 ]] || _gh-conf-err "$2" "$_rel" \
-        "tým '$_value' v klíči 'pr_reviewers_team' není v repository_teams s právem push/write/maintain/admin (CODEOWNERS vlastníka bez write GitHub ignoruje)"
-    fi
-  fi
+  [[ -z "$_value" ]] || _gh-conf-validate-pr-reviewers "$_value" \
+    "${_GH_CONF[projects/$_pk/repository_teams]:-}" "$_rel" 0 "$2"
   _value="${_GH_CONF[projects/$_pk/repository_creators]:-}"
   [[ -z "$_value" ]] || _gh-conf-validate-csv "$_value" "$_GH_CONF_NAME_REGEX" "$_rel" repository_creators "$2"
   _value="${_GH_CONF[projects/$_pk/repository_archivers]:-}"
   [[ -z "$_value" ]] || _gh-conf-validate-csv "$_value" "$_GH_CONF_NAME_REGEX" "$_rel" repository_archivers "$2"
-  if [[ -v _GH_CONF["projects/$_pk/rulesets"] ]] && \
-     _gh-conf-validate-csv "${_GH_CONF[projects/$_pk/rulesets]}" "$_GH_CONF_RULESET_ITEM_REGEX" "$_rel" rulesets "$2"; then
-    _rest="${_GH_CONF[projects/$_pk/rulesets]},"
-    while [[ -n "$_rest" ]]; do
-      _item="${_rest%%,*}"
-      _rest="${_rest#*,}"
-      _profile="${_item%%|*}"
-      [[ -v _vp_profiles["$_profile"] ]] || \
-        _gh-conf-err "$2" "$_rel" "položka '$_item' v klíči 'rulesets' neodkazuje na existující profiles/$_profile.conf"
-      if [[ -v _rs_seen["$_profile"] ]]; then
-        _gh-conf-err "$2" "$_rel" "duplicitní profil '$_profile' v klíči 'rulesets'"
-      fi
-      _rs_seen["$_profile"]=1
-      if [[ "$_item" == *'|jenkins' && -n "$_domain" && -v _vp_domains["$_domain"] && \
-            ! -v _GH_CONF["domains/$_domain/jenkins_user"] ]]; then
-        _gh-conf-err "$2" "$_rel" "položka '$_item' v klíči 'rulesets' má atribut 'jenkins', ale doména '$_domain' nemá klíč 'jenkins_user'"
-      fi
-    done
+  [[ ! -v _GH_CONF["projects/$_pk/rulesets"] ]] || \
+    _gh-conf-validate-rulesets "${_GH_CONF[projects/$_pk/rulesets]}" "$_rel" "$_domain" "$2" "$3" "$4"
+  return 0
+}
+
+_gh-conf-validate-teams-add() {
+  # Zvaliduje repository_teams_add nastavení repa (defs/defs.md): formát
+  # položek jako repository_teams, zákaz ghOrgSecurityManagersTeam, tým už
+  # v repository_teams projektu (klíč jen přidává; redundance skrývá záměr),
+  # duplicita v klíči.
+  # Použití: _gh-conf-validate-teams-add <hodnota> <project_teams_csv> <rel> <errors_ref>
+  local _value="$1" _project=",$2," _rel="$3" _rest _item _slug
+  local -A _seen=()
+  _gh-conf-validate-csv "$_value" "$_GH_CONF_TEAM_REGEX" "$_rel" repository_teams_add "$4" || return 0
+  [[ ",$_value," != *",${GH_SECURITY_MANAGERS_TEAM}|"* ]] || \
+    _gh-conf-err "$4" "$_rel" "repository_teams_add obsahuje tým '${GH_SECURITY_MANAGERS_TEAM}' — je implicitní součástí politiky a nekonfiguruje se"
+  _rest="$_value,"
+  while [[ -n "$_rest" ]]; do
+    _item="${_rest%%,*}"
+    _rest="${_rest#*,}"
+    _slug="${_item%%|*}"
+    if [[ "$_project" == *",$_slug|"* ]]; then
+      _gh-conf-err "$4" "$_rel" "tým '$_slug' v klíči 'repository_teams_add' je už v repository_teams projektu (týmy projektu platí pro každé repo, klíč jen přidává)"
+    elif [[ -v _seen["$_slug"] ]]; then
+      _gh-conf-err "$4" "$_rel" "duplicitní tým '$_slug' v klíči 'repository_teams_add'"
+    fi
+    _seen["$_slug"]=1
+  done
+  return 0
+}
+
+_gh-conf-validate-repo() {
+  # Zvaliduje nastavení repa projects/<key>/<ghName>.conf (defs/defs.md):
+  # aspoň jeden klíč, jen klíče _GH_CONF_REPO_FIELDS s neprázdnou hodnotou;
+  # rulesets stejnými pravidly jako projekt (doména projektu),
+  # repository_teams_add viz _gh-conf-validate-teams-add, pr_reviewers_team
+  # proti efektivním týmům repa s povolenou hodnotou none. Projekt je v této
+  # chvíli už zvalidovaný.
+  # Použití: _gh-conf-validate-repo <key> <ghName> <errors_ref> <profiles_seen_ref> <domains_seen_ref>
+  local _pk="$1" _gh_name="$2" _rel="projects/$1/$2.conf" _prefix="repos/$1/$2"
+  local _field _value _teams
+  if [[ -z "${_GH_CONF_KEYS[$_prefix]:-}" ]]; then
+    _gh-conf-err "$3" "$_rel" "soubor nastavení repa bez klíčů — smaž ho, nebo uveď aspoň jeden z klíčů: ${_GH_CONF_REPO_FIELDS// /, }"
+    return 0
   fi
+  for _field in ${_GH_CONF_KEYS[$_prefix]}; do
+    if [[ " $_GH_CONF_REPO_FIELDS " != *" $_field "* ]]; then
+      _gh-conf-err "$3" "$_rel" "neznámý klíč '$_field' (nastavení repa smí obsahovat jen: ${_GH_CONF_REPO_FIELDS// /, })"
+    elif [[ -z "${_GH_CONF[$_prefix/$_field]}" ]]; then
+      _gh-conf-err "$3" "$_rel" "klíč '$_field' má prázdnou hodnotu"
+    fi
+  done
+  _value="${_GH_CONF[$_prefix/rulesets]:-}"
+  [[ -z "$_value" ]] || \
+    _gh-conf-validate-rulesets "$_value" "$_rel" "${_GH_CONF[projects/$_pk/domain]:-}" "$3" "$4" "$5"
+  _value="${_GH_CONF[$_prefix/repository_teams_add]:-}"
+  [[ -z "$_value" ]] || \
+    _gh-conf-validate-teams-add "$_value" "${_GH_CONF[projects/$_pk/repository_teams]:-}" "$_rel" "$3"
+  _value="${_GH_CONF[$_prefix/pr_reviewers_team]:-}"
+  if [[ -n "$_value" ]]; then
+    _gh-conf-effective "$_pk" "$_gh_name" repository_teams _teams
+    _gh-conf-validate-pr-reviewers "$_value" "$_teams" "$_rel" 1 "$3"
+  fi
+  return 0
+}
+
+_gh-conf-repo-has-settings() {
+  # rc 0 ⇔ nastavení repa <key>/<ghName> existuje (položka indexu; soubor bez
+  # klíčů načtení neprojde, existence = má klíče). Volitelný <ns> = prefix
+  # namespace historické verze (at-<sha>).
+  # Použití: _gh-conf-repo-has-settings <key> <ghName> [ns]
+  [[ -v _GH_CONF_KEYS["${3:+$3/}repos/$1/$2"] ]]
+}
+
+_gh-conf-repo-settings-keys() {
+  # Naplní nameref klíči souboru nastavení repa (mezerami oddělené, v pořadí
+  # řádků); prázdné = repo nastavení nemá.
+  # Použití: _gh-conf-repo-settings-keys <key> <ghName> <out_ref> [ns]
+  declare -n _rsk_out="$3"
+  _rsk_out="${_GH_CONF_KEYS[${4:+$4/}repos/$1/$2]:-}"
+  return 0
+}
+
+_gh-conf-effective() {
+  # Naplní nameref efektivní hodnotou klíče repa (defs/defs.md, nastavení
+  # repa): rulesets a pr_reviewers_team = hodnota nastavení repa, jinak
+  # projektu (pr_reviewers_team=none → prázdný řetězec = žádný tým);
+  # repository_teams = CSV projektu + repository_teams_add (bez dedup —
+  # překryv zakazuje validátor); ostatní pole = hodnota projektu. Prázdný
+  # <ghName> = hodnota projektu (projektové výpisy, admin tým projektu).
+  # Volitelný <ns> = prefix namespace historické verze: klíče se skládají
+  # jako <ns>/projects/<key>/<pole> a <ns>/repos/<key>/<ghName>/<pole>.
+  # Jen builtiny, žádný fork.
+  # Použití: _gh-conf-effective <key> <ghName> <pole> <out_ref> [ns]
+  local _key="$1" _gh_name="$2" _field="$3" _ns="${5:-}" _r _add
+  declare -n _ce_out="$4"
+  _ce_out="${_GH_CONF[${_ns:+$_ns/}projects/$_key/$_field]:-}"
+  [[ -n "$_gh_name" ]] || return 0
+  _r="${_ns:+$_ns/}repos/$_key/$_gh_name"
+  case "$_field" in
+    repository_teams)
+      _add="${_GH_CONF[$_r/repository_teams_add]:-}"
+      [[ -z "$_add" ]] || _ce_out+="${_ce_out:+,}$_add"
+      ;;
+    rulesets|pr_reviewers_team)
+      [[ -v _GH_CONF["$_r/$_field"] ]] || return 0
+      _ce_out="${_GH_CONF[$_r/$_field]}"
+      [[ "$_field" == pr_reviewers_team && "$_ce_out" == "$_GH_CONF_NONE" ]] && _ce_out=""
+      ;;
+  esac
+  return 0
 }
 
 _gh-conf-reserved-project-key() {
@@ -335,45 +532,69 @@ _gh-conf-reserved-project-key() {
   return 0
 }
 
-_gh-conf-load() {
-  # Načte a zvaliduje celou INI konfiguraci conf.d do _GH_CONF (bez source).
-  # Sbírá všechny chyby najednou; při jakékoli chybě je vypíše na stderr,
-  # vyprázdní data a vrátí 1. Úspěch značí _GH_CONF_DATA_LOADED=1.
-  # Použití: _gh-conf-load <confd_root>
-  local _root="$1" _name _reserved
-  local -a _errors=()
-  local -A _profiles_seen=() _bs_seen=() _domains_seen=() _projects_seen=()
-  _GH_CONF=()
-  _GH_CONF_PROJECT_KEYS=()
-  unset _GH_CONF_DATA_LOADED
-  _gh-conf-load-ns "$_root" profiles '^[a-z][a-z0-9_-]*$' _errors _profiles_seen
-  _gh-conf-load-ns "$_root" business-services '^[A-Z][A-Z0-9]*$' _errors _bs_seen
-  _gh-conf-load-domains "$_root" _errors _domains_seen
-  _gh-conf-load-ns "$_root" projects '^[a-z0-9]{1,46}$' _errors _projects_seen
-  for _name in "${!_profiles_seen[@]}"; do
-    _gh-conf-validate-profile "$_name" _errors
+_gh-conf-validate-all() {
+  # Zvaliduje načtená data všech namespace v pořadí závislostí: profily
+  # (vč. rezervovaného jména none), business services, domény, projekty
+  # (vč. rezervovaného projectKey) a nastavení rep; chyby sbírá do nameref.
+  # Použití: _gh-conf-validate-all <errors_ref> <profiles_seen_ref> <bs_seen_ref> <domains_seen_ref>
+  local _name _reserved
+  declare -n _va_errors="$1" _va_profiles="$2" _va_bs="$3" _va_domains="$4"
+  [[ ! -v _va_profiles["$_GH_CONF_NONE"] ]] || _gh-conf-err "$1" "profiles/$_GH_CONF_NONE.conf" \
+    "název profilu '$_GH_CONF_NONE' je rezervovaný (rulesets=$_GH_CONF_NONE znamená žádné rulesety)"
+  for _name in "${!_va_profiles[@]}"; do
+    _gh-conf-validate-profile "$_name" "$1"
   done
-  for _name in "${!_bs_seen[@]}"; do
-    _gh-conf-validate-bs "$_name" _errors
+  for _name in "${!_va_bs[@]}"; do
+    _gh-conf-validate-bs "$_name" "$1"
   done
-  for _name in "${!_domains_seen[@]}"; do
-    _gh-conf-validate-domain "$_name" _errors _bs_seen
+  for _name in "${!_va_domains[@]}"; do
+    _gh-conf-validate-domain "$_name" "$1" "$3"
   done
   _gh-conf-reserved-project-key _reserved
   for _name in "${_GH_CONF_PROJECT_KEYS[@]}"; do
     if [[ -n "$_reserved" && "$_name" == "$_reserved" ]]; then
-      _gh-conf-err _errors "projects/$_name.conf" \
+      _gh-conf-err "$1" "projects/$_name.conf" \
         "projectKey '$_name' je rezervovaný — kolize s gov repem '$GH_GOVERNANCE_REPO'"
     fi
-    _gh-conf-validate-project "$_name" _errors _profiles_seen _domains_seen
+    _gh-conf-validate-project "$_name" "$1" "$2" "$4"
+  done
+  for _name in "${_GH_CONF_REPO_SETTINGS[@]}"; do
+    _gh-conf-validate-repo "${_name%%/*}" "${_name#*/}" "$1" "$2" "$4"
   done
   [[ ${#_GH_CONF_PROJECT_KEYS[@]} -gt 0 ]] || \
-    _errors+=("Chyba: conf.d/projects/ neobsahuje žádný soubor <ghProjectKey>.conf")
+    _va_errors+=("Chyba: conf.d/projects/ neobsahuje žádný soubor <ghProjectKey>.conf")
+  return 0
+}
+
+_gh-conf-load() {
+  # Načte a zvaliduje celou INI konfiguraci conf.d do _GH_CONF (bez source).
+  # Sbírá všechny chyby najednou; při jakékoli chybě je vypíše na stderr,
+  # vyprázdní data (i index) a vrátí 1. Úspěch značí _GH_CONF_DATA_LOADED=1.
+  # Verze gov repa, ze které data pocházejí, je po načtení neznámá
+  # (_GH_CONF_LOADED_SHA unset) — nastavuje ji až _gh-confd-sync po syncu
+  # pracovního klonu; při startu shellu se git nespouští.
+  # Použití: _gh-conf-load <confd_root>
+  local _root="$1"
+  local -a _errors=()
+  local -A _profiles_seen=() _bs_seen=() _domains_seen=() _projects_seen=()
+  _GH_CONF=()
+  _GH_CONF_KEYS=()
+  _GH_CONF_PROJECT_KEYS=()
+  _GH_CONF_REPO_SETTINGS=()
+  unset _GH_CONF_DATA_LOADED _GH_CONF_LOADED_SHA
+  _gh-conf-load-ns "$_root" profiles '^[a-z][a-z0-9_-]*$' _errors _profiles_seen
+  _gh-conf-load-ns "$_root" business-services '^[A-Z][A-Z0-9]*$' _errors _bs_seen
+  _gh-conf-load-domains "$_root" _errors _domains_seen
+  _gh-conf-load-ns "$_root" projects '^[a-z0-9]{1,46}$' _errors _projects_seen
+  _gh-conf-load-repos "$_root" _errors _projects_seen
+  _gh-conf-validate-all _errors _profiles_seen _bs_seen _domains_seen
   if [[ ${#_errors[@]} -gt 0 ]]; then
     printf '%s\n' "${_errors[@]}" >&2
     printf 'Konfigurace conf.d nebyla načtena (chyb: %d).\n' "${#_errors[@]}" >&2
     _GH_CONF=()
+    _GH_CONF_KEYS=()
     _GH_CONF_PROJECT_KEYS=()
+    _GH_CONF_REPO_SETTINGS=()
     return 1
   fi
   _GH_CONF_DATA_LOADED=1

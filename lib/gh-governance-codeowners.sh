@@ -8,9 +8,12 @@
 # API (jeden commit na soubor, bez klonu; přes rulesety projde bot jako
 # bypass actor). Jediné místo, kde reconcile zapisuje obsah spravovaných
 # rep — výhradně v souborech/sekcích označených vlastními značkami.
-# Závislosti: gh-common-defs.sh (_gh-match, topicy migrace), lib/gh-conf.sh
-# (_GH_CONF), lib/gh-governance-report.sh, lib/gh-governance-state.sh
-# (_gh-governance-checkout-root, _gh-governance-state-read),
+# Vlastník = efektivní pr_reviewers_team repa (nastavení repa přepisuje
+# projekt, none = žádný tým; defs/defs.md).
+# Závislosti: gh-common-defs.sh (_gh-match, GH_REPO_PREFIX, topicy migrace),
+# lib/gh-conf.sh (_gh-conf-effective), lib/gh-governance-report.sh,
+# lib/gh-governance-state.sh (_gh-governance-checkout-root,
+# _gh-governance-conf-effective-at-commit),
 # lib/gh-governance-deploy-manifest.sh (strip hlavičky šablon).
 [[ -n "${_GH_GOVERNANCE_CODEOWNERS_LOADED:-}" ]] && \
   declare -F _gh-governance-reconcile-codeowners >/dev/null && return 0
@@ -43,27 +46,29 @@ _gh-governance-codeowners-owner-from-slug() {
 }
 
 _gh-governance-codeowners-owners() {
-  # Vlastník dle aktuální konfigurace projektu (klíč pr_reviewers_team).
-  # Použití: _gh-governance-codeowners-owners <projectKey> <nameref>
-  _gh-governance-codeowners-owner-from-slug \
-    "${_GH_CONF[projects/$1/pr_reviewers_team]:-}" "$2"
+  # Vlastník dle aktuální efektivní konfigurace repa (pr_reviewers_team
+  # nastavení repa, jinak projektu; none → žádný).
+  # Použití: _gh-governance-codeowners-owners <projectKey> <ghName> <nameref>
+  local _slug=""
+  _gh-conf-effective "$1" "$2" pr_reviewers_team _slug
+  _gh-governance-codeowners-owner-from-slug "$_slug" "$3"
 }
 
 _gh-governance-codeowners-old-owners() {
-  # Vlastníci dle konfigurace v commitu ukazatele posledního aplikovaného
-  # stavu — heuristika pro rozlišení „ruční zásah do sekce" (warning) od
-  # „legitimní změna conf.d" (info). Klíč čte přímo z git objektu bez
-  # parseru (stará verze smí být i nevalidní; jde jen o úroveň hlášení).
-  # Prázdný výstup = klíč tehdy nebyl, soubor/SHA neexistuje, nebo bez SHA.
-  # Použití: _gh-governance-codeowners-old-owners <root> <sha> <projectKey> <nameref>
+  # Vlastník dle efektivní konfigurace repa v commitu ukazatele posledního
+  # aplikovaného stavu — heuristika pro rozlišení „ruční zásah do sekce"
+  # (warning) od „legitimní změna conf.d" (info). Čte přes
+  # _gh-governance-conf-effective-at-commit (jeden parser); stará verze smí
+  # být i nevalidní (chyba parsování → prázdný výstup, jde jen o úroveň
+  # hlášení). Prázdný výstup = klíč tehdy nebyl, soubor/SHA neexistuje, none,
+  # nebo bez SHA.
+  # Použití: _gh-governance-codeowners-old-owners <sha> <projectKey> <ghName> <nameref>
   declare -n _oo_ref="$4"
-  local _line _slug=""
+  local _slug=""
   _oo_ref=""
-  [[ -n "$2" ]] || return 0
-  while IFS= read -r _line; do
-    _line="${_line%$'\r'}"
-    [[ "$_line" == pr_reviewers_team=* ]] && { _slug="${_line#pr_reviewers_team=}"; break; }
-  done < <(git -C "$1" show "$2:conf.d/projects/$3.conf" 2>/dev/null)
+  [[ -n "$1" ]] || return 0
+  _gh-governance-conf-effective-at-commit "$1" "$2" "$3" pr_reviewers_team _slug \
+    2>/dev/null || _slug=""
   _gh-governance-codeowners-owner-from-slug "$_slug" "$4"
 }
 
@@ -252,13 +257,13 @@ _gh-governance-codeowners-file-delete() {
 }
 
 _gh-governance-codeowners-teams-check() {
-  # Warning za tým z pr_reviewers_team bez práva write na repu — GitHub
-  # CODEOWNERS vlastníka bez write ignoruje (runtime stav repa; statickou
-  # vazbu na repository_teams hlídá parser conf.d). 1 GET.
-  # Použití: _gh-governance-codeowners-teams-check <repoPath> <projectKey>
-  local _listing _slug _perm _team
+  # Warning za tým z efektivního pr_reviewers_team bez práva write na repu —
+  # GitHub CODEOWNERS vlastníka bez write ignoruje (runtime stav repa;
+  # statickou vazbu na efektivní týmy hlídá parser conf.d). 1 GET.
+  # Použití: _gh-governance-codeowners-teams-check <repoPath> <projectKey> <ghName>
+  local _listing _slug _perm _team=""
   local -A _perms=()
-  _team="${_GH_CONF[projects/$2/pr_reviewers_team]:-}"
+  _gh-conf-effective "$2" "$3" pr_reviewers_team _team
   [[ -n "$_team" ]] || return 0
   _listing=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "repos/$1/teams" \
     --paginate --jq '.[] | .slug + "\t" + .permission') || return 1
@@ -323,13 +328,16 @@ _gh-governance-reconcile-codeowners() {
   # Použití: _gh-governance-reconcile-codeowners <repoName> <branch>
   #          <projectKey> <topicsCSV> <pointer_sha|''>
   local _name="$1" _branch="$2" _key="$3" _topics="$4" _pointer_sha="$5"
+  # ghName odříznutím z názvu (tvar <prefix>-<key>-<ghName> garantuje
+  # klasifikace v -run) — efektivní pr_reviewers_team repa.
+  local _gh_name="${_name#"${GH_REPO_PREFIX}-${_key}-"}"
   local _repo_path="${GITHUB_ORG}/${_name}" _root _owners="" _old_owners=""
   local _section="" _notice="" _content="" _sha="" _exists=1 _rc
   local _action="" _new="" _old_section="" _b="" _s="" _a="" _managed=0
   [[ ",$_topics," == *",${_BB_MIGRATION_TOPIC_MARKER},"* ]] && return 0
   [[ -n "$_branch" ]] || return 0
   _root=$(_gh-governance-checkout-root) || return 1
-  _gh-governance-codeowners-owners "$_key" _owners
+  _gh-governance-codeowners-owners "$_key" "$_gh_name" _owners
   if [[ -n "$_owners" ]]; then
     _gh-governance-codeowners-section "$_root" "$_key" "$_owners" _section || return 1
     _gh-governance-codeowners-notice "$_key" _notice
@@ -356,7 +364,7 @@ _gh-governance-reconcile-codeowners() {
       # Ruční zásah vs. změna conf.d: sekce vzniklá ze staré konfigurace
       # (ukazatel před během) je legitimní stav, cokoli jiného je zásah.
       # Bez ukazatele (adopce) se zásah neprokazuje — info.
-      _gh-governance-codeowners-old-owners "$_root" "$_pointer_sha" "$_key" _old_owners
+      _gh-governance-codeowners-old-owners "$_pointer_sha" "$_key" "$_gh_name" _old_owners
       _old_section=""
       [[ -n "$_old_owners" ]] && _gh-governance-codeowners-section \
         "$_root" "$_key" "$_old_owners" _old_section
@@ -399,6 +407,6 @@ _gh-governance-reconcile-codeowners() {
   esac
   _gh-governance-codeowners-readme-sync "$_repo_path" "$_branch" "$_root" \
     "$_key" "$_owners" "$_managed" || return 1
-  [[ -n "$_owners" ]] && { _gh-governance-codeowners-teams-check "$_repo_path" "$_key" || return 1; }
+  [[ -n "$_owners" ]] && { _gh-governance-codeowners-teams-check "$_repo_path" "$_key" "$_gh_name" || return 1; }
   return 0
 }

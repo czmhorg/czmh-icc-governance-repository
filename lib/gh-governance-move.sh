@@ -151,15 +151,17 @@ _gh-governance-move-detect() {
 }
 
 _gh-governance-move-apply-policy() {
-  # Aplikuje na přesunuté repo politiku cílového projektu a odebere pozůstatky
-  # zdrojového projektu dle cross-project diffu ukazatele: {repository_teams
-  # srcKey na SHA ukazatele state/<staréJméno>} − {dstKey na RUN_SHA}, totéž
-  # Jenkins login. Kostra dle _gh-governance-apply-policy-and-state; ukazatel
-  # NEzapisuje (dělá závěrečný krok _gh-governance-move-run). Adopce (repo
-  # bez ukazatele): nic se neodebírá.
-  # Použití: _gh-governance-move-apply-policy <repo_path> <staréRepoName> <branch> <srcKey> <dstKey> <removed_array_name> <adopted_flag_name> <removed_login_name>
-  local _repo_path="$1" _old_name="$2" _branch="$3" _src="$4" _dst="$5"
-  declare -n _removed_ref="$6" _adopted_ref="$7" _removed_login_ref="$8"
+  # Aplikuje na přesunuté repo efektivní konfiguraci cílového projektu
+  # (včetně případného nastavení repa v cíli) a odebere pozůstatky zdrojového
+  # projektu dle cross-project diffu ukazatele: {efektivní týmy repa v srcKey
+  # na SHA ukazatele state/<staréJméno>} − {v dstKey na RUN_SHA}, totéž
+  # Jenkins login. ghName je po přesunu týž na obou stranách. Kostra dle
+  # _gh-governance-apply-policy-and-state; ukazatel NEzapisuje (dělá
+  # závěrečný krok _gh-governance-move-run). Adopce (repo bez ukazatele):
+  # nic se neodebírá.
+  # Použití: _gh-governance-move-apply-policy <repo_path> <staréRepoName> <branch> <srcKey> <dstKey> <ghName> <removed_array_name> <adopted_flag_name> <removed_login_name>
+  local _repo_path="$1" _old_name="$2" _branch="$3" _src="$4" _dst="$5" _gh_name="$6"
+  declare -n _removed_ref="$7" _adopted_ref="$8" _removed_login_ref="$9"
   local _pointer_sha="" _run_sha _rm_out _rm_login=""
   local -a _rm_teams=()
   _removed_ref=()
@@ -172,13 +174,14 @@ _gh-governance-move-apply-policy() {
     1) _adopted_ref=true ;;
     *) return 1 ;;
   esac
-  _gh-repository-policy-apply "$_repo_path" "$_branch" "$_dst" || return 1
+  _gh-repository-policy-apply "$_repo_path" "$_branch" "$_dst" "$_gh_name" || return 1
   if [[ "$_adopted_ref" == false ]]; then
     # Na rozdíl od jednoklíčového diffu se odebírá i při pointer == RUN_SHA –
     # týmy obou projektů se liší na téže verzi konfigurace.
-    _gh-governance-teams-to-remove-between "$_src" "$_pointer_sha" "$_dst" "$_run_sha" _rm_teams || return 1
+    _gh-governance-teams-to-remove-between "$_src" "$_pointer_sha" "$_gh_name" \
+      "$_dst" "$_run_sha" "$_gh_name" _rm_teams || return 1
     _rm_out=$(mktemp) || return 1
-    if ! _gh-governance-teams-remove "$_repo_path" "$_dst" _rm_teams > "$_rm_out"; then
+    if ! _gh-governance-teams-remove "$_repo_path" "$_dst" "$_gh_name" _rm_teams > "$_rm_out"; then
       rm -f "$_rm_out"
       return 1
     fi
@@ -194,16 +197,16 @@ _gh-governance-move-apply-policy() {
 }
 
 _gh-governance-move-warnings() {
-  # Naplní nameref asoc. pole upozorněními na ruční odchylky repa od politiky
-  # cílového projektu (terminologie reconcile reportu; přesun je nemění, jen
-  # hlásí): teams / rulesets / collaborators – víceřádkové seznamy.
-  # U archivovaného repa volat před zpětnou archivací.
-  # Použití: local -A _w=(); _gh-governance-move-warnings <repo_path> <dstKey> _w
-  local _repo_path="$1" _dst="$2" _expected _live _team _extra
-  declare -n _warn_ref="$3"
+  # Naplní nameref asoc. pole upozorněními na ruční odchylky repa od efektivní
+  # konfigurace v cílovém projektu (terminologie reconcile reportu; přesun je
+  # nemění, jen hlásí): teams / rulesets / collaborators – víceřádkové
+  # seznamy. U archivovaného repa volat před zpětnou archivací.
+  # Použití: local -A _w=(); _gh-governance-move-warnings <repo_path> <dstKey> <ghName> _w
+  local _repo_path="$1" _dst="$2" _gh_name="$3" _expected _live _team _extra
+  declare -n _warn_ref="$4"
   local -A _policy=()
   _warn_ref=([teams]="" [rulesets]="" [collaborators]="")
-  _expected=$(_gh-repository-policy-expected-teams "$_dst") || return 1
+  _expected=$(_gh-repository-policy-expected-teams "$_dst" "$_gh_name") || return 1
   while IFS=$'\t' read -r _team _extra; do
     [[ -n "$_team" ]] && _policy["$_team"]=1
   done <<< "$_expected"
@@ -221,7 +224,7 @@ _gh-governance-move-warnings() {
     [[ "$_team" == "${GH_RULESET_PREFIX}-"* ]] && continue
     _warn_ref[rulesets]+="${_warn_ref[rulesets]:+$'\n'}$_team"
   done <<< "$_live"
-  _live=$(_gh-repository-policy-extra-collaborators-list "$_repo_path" "$_dst") || return 1
+  _live=$(_gh-repository-policy-extra-collaborators-list "$_repo_path" "$_dst" "$_gh_name") || return 1
   while IFS=$'\t' read -r _team _extra; do
     [[ -n "$_team" ]] || continue
     _warn_ref[collaborators]+="${_warn_ref[collaborators]:+$'\n'}$_team ($_extra)"
@@ -343,7 +346,7 @@ _gh-governance-move-run() {
   # Použití: local -A _s=(); _gh-governance-move-run <srcKey> <ghName> <dstKey> <keep|cancel> _s
   local _src="$1" _name="$2" _dst="$3" _redirect="$4"
   declare -n _sum_ref="$5"
-  local _state="" _archived="" _error="" _old_name _new_name _new_path _branch
+  local _state="" _archived="" _error="" _old_name _new_name _new_path _branch _eff
   local _run_sha _adopted=false _removed_login="" _delete_issue="" _redirect_result=""
   local -a _removed=()
   local -A _info=() _warn=()
@@ -389,8 +392,8 @@ _gh-governance-move-run() {
     return 1
   fi
   _gh-governance-move-apply-policy "$_new_path" "$_old_name" "$_branch" "$_src" "$_dst" \
-    _removed _adopted _removed_login || return 1
-  _gh-governance-move-warnings "$_new_path" "$_dst" _warn || return 1
+    "$_name" _removed _adopted _removed_login || return 1
+  _gh-governance-move-warnings "$_new_path" "$_dst" "$_name" _warn || return 1
   if [[ "$_redirect" == cancel ]]; then
     # I při dokončování (half/done) – zrušení redirectu mohlo v minulém běhu
     # selhat; existující repo i chybějící redirect funkce sama idempotentně
@@ -413,8 +416,17 @@ _gh-governance-move-run() {
   _sum_ref[removed_login]="$_removed_login"
   _sum_ref[delete_issue]="$_delete_issue"
   _sum_ref[redirect_result]="$_redirect_result"
-  _sum_ref[expected_teams]="${_GH_CONF[projects/$_dst/repository_teams]:-}"
-  _sum_ref[rulesets]="${_GH_CONF[projects/$_dst/rulesets]:-}"
+  # Efektivní konfigurace repa v cíli (nastavení repa v cíli se použilo);
+  # klíče souborů nastavení obou stran pro komentář (zdrojový soubor zůstává
+  # jako nastavení bez repa – bot conf.d nemění).
+  _gh-conf-effective "$_dst" "$_name" repository_teams _eff
+  _sum_ref[expected_teams]="$_eff"
+  _gh-conf-effective "$_dst" "$_name" rulesets _eff
+  _sum_ref[rulesets]="$_eff"
+  _gh-conf-repo-settings-keys "$_src" "$_name" _eff
+  _sum_ref[src_settings]="$_eff"
+  _gh-conf-repo-settings-keys "$_dst" "$_name" _eff
+  _sum_ref[dst_settings]="$_eff"
   _sum_ref[mhn]=$(_gh-repository-policy-properties-expected-mhn "$_dst") || return 1
   _sum_ref[warn_teams]="${_warn[teams]}"
   _sum_ref[warn_rulesets]="${_warn[rulesets]}"
@@ -432,9 +444,15 @@ _gh-governance-split-map-check() {
   # fáze 0/2): TSV řádky ghName<TAB>newProjectKey[<TAB>keep], bez hlavičky
   # a prázdných řádků, LF, unikátní ghName, cílový klíč ≠ zdrojový,
   # setříděno LC_ALL=C podle ghName (deterministický diff v gov repu).
+  # Fail-fast nastavení repa (návrh nastavení-repa, split-project): repo se
+  # souborem nastavení ve zdroji a bez něj v cíli je chyba (viz
+  # _gh-governance-split-settings-missing). Kořen pro state/ = rodič conf.d
+  # bez ověření gitu – kontrola zůstává offline i pro plánovací tool nad
+  # prostým adresářem conf.d (bez state/ = žádný hotový přesun).
   # Vypíše všechny nalezené chyby; rc = 0 validní, 1 = chyby.
   # Použití: _gh-governance-split-map-check <mapa.tsv> <srcKey>
   local _map="$1" _src="$2" _line _name _key _redirect _extra _n=0 _errors=0
+  local _root="${_GH_COMMON_CONF_D%/*}"
   local -A _seen=()
   if [[ ! -f "$_map" ]]; then
     echo "Chyba: Mapa '$_map' neexistuje." >&2
@@ -465,6 +483,9 @@ _gh-governance-split-map-check() {
     elif [[ "$_key" == "$_src" ]]; then
       echo "Chyba: mapa řádek $_n: cílový klíč je shodný se zdrojovým projektem '$_src'." >&2
       _errors=$(( _errors + 1 ))
+    elif _gh-governance-split-settings-missing "$_src" "$_name" "$_key" "$_root"; then
+      echo "Chyba: mapa řádek $_n: repo '$_name' má nastavení ve zdrojovém projektu (conf.d/projects/$_src/$_name.conf) a nemá ho v cílovém '$_key' – založ conf.d/projects/$_key/$_name.conf PR, nebo soubor ve zdroji PR smaž (výchozí politika cíle)." >&2
+      _errors=$(( _errors + 1 ))
     fi
     case "$_redirect" in
       ""|keep) ;;
@@ -487,6 +508,19 @@ _gh-governance-split-map-check() {
   [[ $_errors -eq 0 ]]
 }
 
+_gh-governance-split-settings-missing() {
+  # rc 0 ⇔ repo má nastavení repa ve zdrojovém projektu, v cílovém ne
+  # a přesun ještě neproběhl (ukazatel state/<prefix>-<dst>-<ghName>
+  # pod <root> neexistuje – hotová repa restartovaný běh přeskakuje,
+  # soubor ve zdroji se maže až závěrečným PR). Čistá offline funkce
+  # nad indexem konfigurace a adresářem state/ pod <root>.
+  # Použití: _gh-governance-split-settings-missing <srcKey> <ghName> <dstKey> <root>
+  local _src="$1" _name="$2" _dst="$3" _root="$4"
+  _gh-conf-repo-has-settings "$_src" "$_name" || return 1
+  _gh-conf-repo-has-settings "$_dst" "$_name" && return 1
+  [[ ! -f "$_root/state/${GH_REPO_PREFIX}-${_dst}-${_name}" ]]
+}
+
 _gh-governance-split-map-rows() {
   # Načte řádky (předem zvalidované) mapy do nameref pole položek
   # "ghName<TAB>newProjectKey<TAB>keep|cancel" (třetí sloupec doplněn).
@@ -507,8 +541,9 @@ _gh-governance-split-map-rows() {
 _gh-governance-move-comment() {
   # Vyrenderuje markdown závěrečného komentáře issue / summary splitu ze
   # summary přesunu (návrh, Závěrečný komentář issue): shrnutí, provedené
-  # změny, upozornění na ruční odchylky (terminologie reconcile warningů;
-  # přesun je neměnil, repo si je nese s sebou).
+  # změny (včetně nastavení repa: použité v cíli, ponechané ve zdroji jako
+  # nastavení bez repa), upozornění na ruční odchylky (terminologie
+  # reconcile warningů; přesun je neměnil, repo si je nese s sebou).
   # Použití: _gh-governance-move-comment <summary_assoc_name>
   local _line
   declare -n _c_ref="$1"
@@ -516,6 +551,10 @@ _gh-governance-move-comment() {
   echo ""
   echo "**Provedené změny:**"
   echo "- politika cílového projektu aplikována (týmy: \`${_c_ref[expected_teams]}\`; rulesety: \`${_c_ref[rulesets]}\`; property MHN: \`${_c_ref[mhn]}\`)"
+  [[ -n "${_c_ref[dst_settings]:-}" ]] && \
+    echo "- v cílovém projektu existuje nastavení repa \`conf.d/projects/${_c_ref[dst_key]}/${_c_ref[gh_name]}.conf\` (${_c_ref[dst_settings]// /, }) a bylo použito"
+  [[ -n "${_c_ref[src_settings]:-}" ]] && \
+    echo "- nastavení repa ve zdrojovém projektu zůstalo: \`conf.d/projects/${_c_ref[src_key]}/${_c_ref[gh_name]}.conf\` (${_c_ref[src_settings]// /, }) je teď nastavení bez repa – smaž ho PR do gov repa"
   if [[ -n "${_c_ref[removed_teams]}" ]]; then
     while IFS= read -r _line; do
       [[ -n "$_line" ]] && echo "- odebrán tým zdrojového projektu dle diffu ukazatele: \`$_line\`"

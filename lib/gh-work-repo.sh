@@ -13,6 +13,10 @@
 # zahazují s hláškou. Cizí obsah (divergence, cizí origin, ne-git adresář) se nikdy nemaže ani
 # nepřepisuje — _gh-work-repo-error vypíše akční hlášku pro ruční zásah.
 # Pořadí práce s pracovním repem: zámek → sync → práce → uvolnění zámku.
+# Klony mají repo-lokální core.autocrlf=false (nastavuje clone i update) —
+# validace nad obsahem (hlavičky TSV, sha256 fingerprinty) jsou bajtově přesné
+# a nesmí záviset na globálním/systémovém git configu uživatele (Git for
+# Windows má systémově autocrlf=true).
 # Závislosti: git; GH_WORK_REPOS_ROOT definuje gh-common-defs.sh.
 [[ -n "${_GH_WORK_REPO_LOADED:-}" ]] && \
   declare -F _gh-work-repo-sync >/dev/null && return 0
@@ -20,6 +24,12 @@ _GH_WORK_REPO_LOADED=1
 
 # Timeout čekání na obsazený zámek v sekundách (testy hodnotu snižují).
 : "${_GH_WORK_LOCK_TIMEOUT_S:=30}"
+
+# SHA HEAD pracovního repa po posledním úspěšném _gh-work-repo-sync, je-li
+# známé bez dalšího git procesu (shoda s origin, ff-merge, push vlastních
+# commitů — _gh-work-repo-reconcile obě SHA počítá). Prázdné = neznámé (čerstvý
+# klon, selhání). Čte _gh-confd-sync: conf.d znovu načte jen při změně SHA.
+_GH_WORK_REPO_HEAD=""
 
 _gh-work-repos-root() {
   # Vypíše kořen pracovních rep funkcí.
@@ -161,6 +171,7 @@ _gh-work-repo-clone-auth() {
   # + checkout větve. Výstup gitu jde na stdout (volající ho maskuje).
   # Použití: _gh-work-repo-clone-auth <tmp_dir> <plain_url> <branch> <auth_url>
   git init -q "$1" 2>&1 \
+    && git -C "$1" config core.autocrlf false 2>&1 \
     && git -C "$1" remote add origin "$2" 2>&1 \
     && git -C "$1" fetch -q "$4" "+refs/heads/$3:refs/remotes/origin/$3" 2>&1 \
     && git -C "$1" checkout -q -b "$3" "origin/$3" 2>&1
@@ -178,7 +189,7 @@ _gh-work-repo-clone() {
   rm -rf "$_tmp"
   if [[ -z "$_auth_url" ]]; then
     _op="clone"
-    _out=$(git clone --quiet "$_url" "$_tmp" 2>&1); _rc=$?
+    _out=$(git clone --quiet --config core.autocrlf=false "$_url" "$_tmp" 2>&1); _rc=$?
   else
     _op="clone (init + fetch)"
     _out=$(_gh-work-repo-clone-auth "$_tmp" "$_url" "$_branch" "$_auth_url"); _rc=$?
@@ -204,6 +215,33 @@ _gh-work-repo-check-origin() {
     _gh-work-repo-error "$1" "kontrola remote" "origin URL '$_out' neodpovídá očekávané '$2'"
     return 1
   fi
+}
+
+_gh-work-repo-ensure-eol() {
+  # Repo-lokální core.autocrlf=false (idempotentně — léčí i klony ze starších
+  # verzí, které si volbu nenastavily) + detekce klonu checkoutnutého ještě
+  # s autocrlf=true (index LF, worktree CRLF): takový klon by shodil bajtově
+  # přesné validace obsahu, oprava = smazání a reclone člověkem. Jediné
+  # spuštění git ls-files --eol, parsování bez dalších procesů (Git Bash na
+  # Windows platí ~100 ms za každý spawn). Detekce i/lf+w/crlf nemá falešné
+  # poplachy: smazaný soubor má w/none, binární i/-text, soubor commitnutý
+  # s CRLF i/crlf. Musí běžet PŘED _gh-work-repo-ensure-clean — reset --hard
+  # po přepnutí configu by CRLF soubory vypsal jako rozpracované změny
+  # a nedeterministicky přepsal.
+  # Použití: _gh-work-repo-ensure-eol <repo_dir>
+  local _dir="$1" _i _w _rest _cmd
+  git -C "$_dir" config core.autocrlf false 2>/dev/null
+  while read -r _i _w _rest; do
+    [[ "$_i" == i/lf && "$_w" == w/crlf ]] || continue
+    echo "Chyba: Pracovní repo '$_dir' má v pracovním stromě CRLF konce řádků (checkout proběhl s core.autocrlf=true)." >&2
+    _cmd=$(_gh-work-repo-clean-cmd "$_dir")
+    if [[ -n "$_cmd" ]]; then
+      echo "Smaž ho: $_cmd --force --apply – příští běh si ho naclonuje znovu s korektními LF." >&2
+    else
+      echo "Smaž adresář klonu ručně – příští běh si ho naclonuje znovu s korektními LF." >&2
+    fi
+    return 1
+  done < <(git -C "$_dir" ls-files --eol 2>/dev/null)
 }
 
 _gh-work-repo-ensure-clean() {
@@ -256,28 +294,33 @@ _gh-work-repo-push-ahead() {
 _gh-work-repo-reconcile() {
   # Srovná HEAD s čerstvě staženým origin: shoda → nic; HEAD předek origin →
   # ff merge; origin předek HEAD → push vlastních commitů; divergence → ruční
-  # zásah (nic se nepřepisuje).
+  # zásah (nic se nepřepisuje). Po úspěchu zveřejní výsledné SHA HEAD
+  # v _GH_WORK_REPO_HEAD (žádný další git proces).
   # Použití: _gh-work-repo-reconcile <repo_dir> <branch> <auth_url>
-  local _dir="$1" _branch="$2" _auth_url="$3" _upstream _up _out
+  local _dir="$1" _branch="$2" _auth_url="$3" _upstream _up _head _out
   [[ -n "$_branch" ]] && _upstream="refs/remotes/origin/$_branch" || _upstream="@{u}"
   _up=$(git -C "$_dir" rev-parse "$_upstream" 2>&1) || {
     _gh-work-repo-error "$_dir" "kontrola upstreamu" "$_up"; return 1; }
-  [[ "$(git -C "$_dir" rev-parse HEAD 2>/dev/null)" != "$_up" ]] || return 0
+  _head=$(git -C "$_dir" rev-parse HEAD 2>/dev/null)
+  [[ "$_head" != "$_up" ]] || { _GH_WORK_REPO_HEAD="$_up"; return 0; }
   if git -C "$_dir" merge-base --is-ancestor HEAD "$_up" 2>/dev/null; then
-    _out=$(git -C "$_dir" merge --ff-only --quiet "$_up" 2>&1) && return 0
+    _out=$(git -C "$_dir" merge --ff-only --quiet "$_up" 2>&1) && {
+      _GH_WORK_REPO_HEAD="$_up"; return 0; }
     _gh-work-repo-error "$_dir" "merge --ff-only" "$_out"
     return 1
   fi
   if git -C "$_dir" merge-base --is-ancestor "$_up" HEAD 2>/dev/null; then
-    _gh-work-repo-push-ahead "$_dir" "$_branch" "$_auth_url" "$_upstream"
-    return $?
+    _gh-work-repo-push-ahead "$_dir" "$_branch" "$_auth_url" "$_upstream" || return 1
+    _GH_WORK_REPO_HEAD="$_head"
+    return 0
   fi
   _gh-work-repo-error "$_dir" "kontrola divergence" \
     "lokální HEAD a $_upstream se rozešly (lokálně navíc: $(git -C "$_dir" rev-list --count "$_up..HEAD" 2>/dev/null), na origin navíc: $(git -C "$_dir" rev-list --count "HEAD..$_up" 2>/dev/null)). Prošetři 'git -C \"$_dir\" log --oneline --left-right $_upstream...HEAD'; automaticky se nic nepřepisuje."
 }
 
 _gh-work-repo-update() {
-  # Aktualizace existujícího pracovního repa: kontrola repa a originu → úklid
+  # Aktualizace existujícího pracovního repa: kontrola repa a originu → eol
+  # (autocrlf=false + detekce CRLF klonu) → úklid
   # index.lock → čistý strom (zahození zbytků) → fetch → srovnání s čerstvým origin
   # (ff / push vlastních commitů / divergence = ruční zásah). Kontroly běží až
   # po fetchi, aby už pushnutý commit s neposunutým remote-tracking refem
@@ -285,6 +328,7 @@ _gh-work-repo-update() {
   # Použití: _gh-work-repo-update <repo_dir> <plain_url> [<branch> <auth_url>]
   local _dir="$1" _url="$2" _branch="${3:-}" _auth_url="${4:-}"
   _gh-work-repo-check-origin "$_dir" "$_url" || return 1
+  _gh-work-repo-ensure-eol "$_dir" || return 1
   _gh-work-repo-clear-index-lock "$_dir"
   _gh-work-repo-ensure-clean "$_dir" || return 1
   _gh-work-repo-fetch "$_dir" "$_branch" "$_auth_url" || return 1
@@ -298,8 +342,11 @@ _gh-work-repo-sync() {
   # ztratit. Volá se pod zámkem (_gh-work-repo-lock). S <auth_url> (BB:
   # user:token v URL) se tokenizovaná URL používá výhradně jako argument
   # fetche a pushe — v .git/config zůstává jen <plain_url>.
+  # SHA HEAD po syncu zveřejní v _GH_WORK_REPO_HEAD (po clone zůstává prázdné =
+  # neznámé; modul syncuje i řídicí repa migrace, proto se na začátku nuluje).
   # Použití: _gh-work-repo-sync <repo_dir> <plain_url> [<branch> <auth_url>]
   local _dir="$1"
+  _GH_WORK_REPO_HEAD=""
   rm -rf "$_dir.partial"
   if [[ ! -d "$_dir" ]]; then
     _gh-work-repo-clone "$@"

@@ -105,11 +105,12 @@ _gh-governance-apply-policy-and-state() {
   # ukazatel→RUN_SHA a zapíše ukazatel do checkoutu (commit+push dělá
   # volající přes _gh-governance-state-push).
   # Adopce (repo bez ukazatele): nic se neodebírá, ukazatel se založí.
-  # Výstupy: nameref pole odebraných týmů, nameref adopce (true/false),
-  # nameref odebraného Jenkins loginu (prázdný = nic).
-  # Použití: _gh-governance-apply-policy-and-state <repo_path> <ghRepoName> <branch> <projectKey> <removed_array_name> <adopted_flag_name> <removed_login_name>
-  local _repo_path="$1" _repo_name="$2" _branch="$3" _key="$4"
-  declare -n _removed_ref="$5" _adopted_ref="$6" _removed_login_ref="$7"
+  # <ghName> = efektivní konfigurace repa (nastavení repa) pro policy i diff
+  # ukazatele. Výstupy: nameref pole odebraných týmů, nameref adopce
+  # (true/false), nameref odebraného Jenkins loginu (prázdný = nic).
+  # Použití: _gh-governance-apply-policy-and-state <repo_path> <ghRepoName> <branch> <projectKey> <ghName> <removed_array_name> <adopted_flag_name> <removed_login_name>
+  local _repo_path="$1" _repo_name="$2" _branch="$3" _key="$4" _gh_name="$5"
+  declare -n _removed_ref="$6" _adopted_ref="$7" _removed_login_ref="$8"
   local _pointer_sha="" _run_sha _rm_out _rm_login=""
   local -a _rm_teams=()
   _removed_ref=()
@@ -122,11 +123,11 @@ _gh-governance-apply-policy-and-state() {
     1) _adopted_ref=true ;;
     *) return 1 ;;
   esac
-  _gh-repository-policy-apply "$_repo_path" "$_branch" "$_key" || return 1
+  _gh-repository-policy-apply "$_repo_path" "$_branch" "$_key" "$_gh_name" || return 1
   if [[ "$_adopted_ref" == false && "$_pointer_sha" != "$_run_sha" ]]; then
-    _gh-governance-teams-to-remove "$_key" "$_pointer_sha" "$_run_sha" _rm_teams || return 1
+    _gh-governance-teams-to-remove "$_key" "$_gh_name" "$_pointer_sha" "$_run_sha" _rm_teams || return 1
     _rm_out=$(mktemp) || return 1
-    if ! _gh-governance-teams-remove "$_repo_path" "$_key" _rm_teams > "$_rm_out"; then
+    if ! _gh-governance-teams-remove "$_repo_path" "$_key" "$_gh_name" _rm_teams > "$_rm_out"; then
       rm -f "$_rm_out"
       return 1
     fi
@@ -141,6 +142,28 @@ _gh-governance-apply-policy-and-state() {
     fi
   fi
   _gh-governance-state-write "$_repo_name" "$_run_sha"
+}
+
+_gh-governance-repo-settings-note() {
+  # Vypíše jednu větu o nastavení repa conf.d/projects/<key>/<ghName>.conf
+  # pro výstup operace i komentář issue (sdílí ji lib i entry skripty);
+  # bez nastavení nevypíše nic (rc 0). Režim used = použito při aplikaci
+  # politiky (klíče souboru, defs/defs.md – nastavení repa); orphan = po
+  # zániku repa soubor zůstává jako nastavení bez repa (bot conf.d nemění,
+  # nové repo téhož jména ho převezme). Čistá offline funkce nad indexem.
+  # Použití: _gh-governance-repo-settings-note <projectKey> <ghName> <used|orphan>
+  local _key="$1" _name="$2" _mode="$3" _keys=""
+  local _file="conf.d/projects/${_key}/${_name}.conf"
+  _gh-conf-repo-settings-keys "$_key" "$_name" _keys
+  [[ -n "$_keys" ]] || return 0
+  case "$_mode" in
+    used)
+      printf 'Použito nastavení repa: %s (%s).\n' "${_keys// /, }" "$_file" ;;
+    orphan)
+      printf 'Soubor nastavení %s zůstává (nastavení bez repa); smaž ho PR, nebo ponech pro nové repo stejného jména.\n' "$_file" ;;
+    *) echo "Chyba: Režim poznámky musí být used nebo orphan (je '$_mode')." >&2
+       return 1 ;;
+  esac
 }
 
 _gh-governance-new() {
@@ -208,7 +231,7 @@ _gh-governance-new() {
   GH_HOST="$GITHUB_ORG_HOSTNAME" gh repo edit "$_repo_path" \
     --add-topic "${GH_PROJECT_TOPIC_PREFIX}${_key}" >/dev/null || return 1
 
-  _gh-governance-apply-policy-and-state "$_repo_path" "$_repo_name" "$_branch" "$_key" \
+  _gh-governance-apply-policy-and-state "$_repo_path" "$_repo_name" "$_branch" "$_key" "$_name" \
     _removed _adopted _removed_login || return 1
   _gh-governance-manifest-upsert "$_key" "$_name" false || return 1
   _gh-governance-state-push "new-repository: $_repo_name" || return 1
@@ -217,6 +240,7 @@ _gh-governance-new() {
   [[ -n "$_removed_login" ]] && \
     echo "Odebrán Jenkins collaborator '$_removed_login' dle diffu konfigurace."
   echo "Hotovo: repo '$_repo_path' odpovídá INI konfiguraci projektu '$_key'."
+  _gh-governance-repo-settings-note "$_key" "$_name" used
 }
 
 _gh-governance-archive() {
@@ -282,7 +306,7 @@ _gh-governance-unarchive() {
     echo "Chyba: Repo '$_repo_path' nemá výchozí větev." >&2
     return 1
   fi
-  _gh-governance-apply-policy-and-state "$_repo_path" "$_repo_name" "$_branch" "$_key" \
+  _gh-governance-apply-policy-and-state "$_repo_path" "$_repo_name" "$_branch" "$_key" "$_name" \
     _removed _adopted _removed_login || return 1
   _gh-governance-manifest-upsert "$_key" "$_name" false || return 1
   _gh-governance-state-push "unarchive-repository: $_repo_name" || return 1
@@ -299,7 +323,8 @@ _gh-governance-track-delete() {
   # Sleduje zánik repa po podané žádosti o smazání (track-delete issue,
   # defs/defs-governance-repo.md): polluje existenci repa přímým dotazem;
   # teprve po prokázaném HTTP 404 uklidí ukazatel state/<ghRepoName> i řádek
-  # completion manifestu a pushne. Nic na GitHubu nemaže.
+  # completion manifestu a pushne. Nic na GitHubu nemaže; soubor nastavení
+  # repa zůstává (nastavení bez repa) – po úklidu na něj upozorní.
   # rc 0 = repo zaniklo a úklid proběhl, rc 2 = repo po timeoutu stále
   # existuje (není selhání), rc 1 = provozní chyba.
   # Použití: _gh-governance-track-delete <projectKey> <ghName>
@@ -320,6 +345,7 @@ _gh-governance-track-delete() {
       _gh-governance-manifest-remove "$_key" "$_name" || return 1
       _gh-governance-state-push "track-delete: $_repo_name" || return 1
       echo "Hotovo: repo '$_repo_path' zaniklo, ukazatel i řádek manifestu uklizeny."
+      _gh-governance-repo-settings-note "$_key" "$_name" orphan
       return 0
     fi
     if (( _elapsed_s >= _timeout_s )); then

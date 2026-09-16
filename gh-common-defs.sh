@@ -282,9 +282,25 @@ _gh-gov-repo-sync-locked() {
   return 0
 }
 
+_gh-confd-reload() {
+  # Znovu načte conf.d z pracovního klonu gov repa jen při změně: když
+  # konfigurace v paměti chybí, SHA HEAD po syncu není známé (čerstvý klon,
+  # start shellu bez gitu) nebo se liší od SHA načtené konfigurace
+  # (_GH_CONF_LOADED_SHA; _gh-conf-load ji ruší). Parser tak neběží při
+  # každém volání funkce, jen po změně gov repa. rc = rc _gh-conf-load.
+  # Použití: _gh-confd-reload
+  if [[ -n "${_GH_CONF_DATA_LOADED:-}" && -n "${_GH_WORK_REPO_HEAD:-}" && \
+        "$_GH_WORK_REPO_HEAD" == "${_GH_CONF_LOADED_SHA:-}" ]]; then
+    return 0
+  fi
+  _gh-conf-load "$_GH_COMMON_CONF_D" || return 1
+  _GH_CONF_LOADED_SHA="${_GH_WORK_REPO_HEAD:-}"
+}
+
 _gh-confd-sync() {
   # Synchronizuje pracovní klon gov repa (zdroj conf.d) a znovu načte
-  # konfiguraci; volá se na začátku každé funkce, která conf.d potřebuje.
+  # konfiguraci (jen při změně gov repa — _gh-confd-reload); volá se na
+  # začátku každé funkce, která conf.d potřebuje.
   # Společný vstupní bod všech pracovních funkcí (i přes _gh-confd-sync-ro) —
   # proto tudy vede blokace zastaralé verze skriptů.
   # Při _GH_CONFD_SYNC=0 (GH_CONFD_ROOT override, GitHub Actions) je no-op —
@@ -314,7 +330,7 @@ _gh-confd-sync() {
     return 0
   fi
   _gh-gov-repo-sync-locked "$_dir" || return 1
-  if ! _gh-conf-load "$_GH_COMMON_CONF_D"; then
+  if ! _gh-confd-reload; then
     _gh-work-repo-unlock "$_dir"
     return 1
   fi

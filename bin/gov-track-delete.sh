@@ -60,8 +60,11 @@ case "$_gov_td_mode" in
     _gh-governance-track-delete "${_gov_td_pos[0]}" "${_gov_td_pos[1]}"
     _gov_td_rc=$?
     if [[ $_gov_td_rc -eq 0 ]]; then
+      # Soubor nastavení repa bot nemaže – komentář na něj upozorní (jen
+      # existuje-li; defs/defs.md – nastavení bez repa).
+      _gov_td_note=$(_gh-governance-repo-settings-note "${_gov_td_pos[0]}" "${_gov_td_pos[1]}" orphan)
       _gh-governance-issue-close-done "${_gov_td_pos[2]}" \
-        "Repo zaniklo; ukazatel /state/ i řádek completion manifestu uklizeny."
+        "Repo zaniklo; ukazatel /state/ i řádek completion manifestu uklizeny.${_gov_td_note:+$'\n'$_gov_td_note}"
     elif [[ $_gov_td_rc -eq 2 ]]; then
       # Není selhání: issue zůstává otevřené, dořeší ho noční reconcile.
       GH_HOST="$GITHUB_ORG_HOSTNAME" gh issue comment "${_gov_td_pos[2]}" \
