@@ -18,7 +18,9 @@ nastavení, aniž by cokoli musel kdokoli nastavovat ručně:
   uživatelé žádosti podávají pohodlně funkcemi `gh-*` (viz níže).
 - **Denní kontrola konzistence (reconcile)** — automatika denně porovnává
   skutečný stav repozitářů s konfigurací, drift opravuje a odchylky hlásí
-  v issue `reconcile-report`.
+  v issue `reconcile-report`. Hlídá i pull requesty: u otevřeného PR bez
+  žádosti o review požádá tým projektu (`pr_reviewers_team`) a projekt bez
+  tohoto týmu hlásí.
 - **Migrace z Bitbucketu** — repozitáře se z Bitbucket Serveru přenášejí
   nástroji `bb-*` podle jmenné konvence `czmh-icc-<projekt>-<jméno>`
   a rovnou podléhají výše uvedeným pravidlům.

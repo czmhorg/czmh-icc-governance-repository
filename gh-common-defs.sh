@@ -134,7 +134,7 @@ _GH_PROJECT_KEY_REGEX='^[a-z0-9]+$'
 : "${GH_VERSION_CHECK_TTL_MIN:=1440}"
 
 # Hlášení čekajících PR ve funkcích gh-* („Máš 1 schválený PR k merge, 2 PR
-# čekají na tvoje review → gh-pr-list"; docs/navrh/gh-pr-funkce.md): maximální
+# čekají na tvoje review → gh-pr-list"; docs/implementovano/navrh/gh-pr-funkce.md): maximální
 # stáří cache počtů v minutách před obnovou na pozadí a zároveň nejmenší
 # odstup dvou stejných hlášení v jednom shellu. 0 = hlášení vypnuto.
 : "${GH_PR_NOTICE_TTL_MIN:=10}"

@@ -1,9 +1,9 @@
 #!/bin/bash
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
-# Jistota doručení, vrstvy 2 a 3 (docs/navrh/gh-pr-funkce.md, kapitola
-# *Jistota doručení*; docs/plans/plan-gh-pr-revize.md, etapa E): denní
-# reconcile hlásí projekt bez pr_reviewers_team (vrstva 2) a u otevřených PR
+# Jistota doručení, vrstvy 2 a 3 (docs/implementovano/navrh/gh-pr-funkce.md,
+# kapitola *Jistota doručení*; docs/implementovano/plan/plan-gh-pr-revize.md,
+# etapa E): denní reconcile hlásí projekt bez pr_reviewers_team (vrstva 2) a u otevřených PR
 # spravovaných rep bez žádosti o review žádá tým projektu, resp. hlásí PR,
 # u kterých žádost zanikla po review (vrstva 3). Rozhodovací logika je
 # v čisté funkci (offline testy); výčet PR jde jedním GraphQL search dotazem
