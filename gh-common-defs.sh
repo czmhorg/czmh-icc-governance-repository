@@ -71,8 +71,9 @@ _BB_MIGRATION_TOPIC_MARKER_DONE=bb-gh-migrated
 # s právem admin na každé spravované repo (bot není org owner — bez toho by
 # jeho PAT zmigrovaná/založená repa neviděl a reconcile by na nich selhal).
 # Prázdná hodnota = chyba preflightu.
-# Testovací default: účet, pod kterým běží testy; produkce: czmh-mhi-git-bbpk-governance-bot.
-: "${GH_GOVERNANCE_BOT_USER:=czmha}"
+# Testovací default: czmha-bot (org member bez owner role — parita práv
+# s machine userem; czmha je běžný uživatel); produkce: czmh-mhi-git-bbpk-governance-bot.
+: "${GH_GOVERNANCE_BOT_USER:=czmha-bot}"
 
 # Bypass adminů gov repa v rulesetu výchozí větve gov-default-branch
 # (gov-init.sh; docs/navrh/ochrana-gov-repa.md): pull_request = admini repa
