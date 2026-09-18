@@ -12,7 +12,8 @@
 # lib/gh-governance-report.sh, lib/gh-governance-manifest.sh (rebuild),
 # lib/gh-governance-issue.sh (track-delete sweep; jen v GitHub Actions),
 # lib/gh-governance-deploy-manifest.sh (kontrola driftu kódu),
-# lib/gh-governance-codeowners.sh (správa CODEOWNERS dle pr_reviewers_team).
+# lib/gh-governance-codeowners.sh (správa CODEOWNERS dle pr_reviewers_team),
+# lib/gh-governance-pr-review.sh (PR bez žádosti o review, projekt bez týmu).
 [[ -n "${_GH_GOVERNANCE_RECONCILE_LOADED:-}" ]] && \
   declare -F _gh-governance-classify >/dev/null && return 0
 _GH_GOVERNANCE_RECONCILE_LOADED=1
@@ -487,6 +488,9 @@ _gh-governance-reconcile-run() {
   local _key _n _level _subset _listing_file _dead _manifest_added=0 _manifest_removed=0
   local _pointer _gh_name
   local -A _count_archived=() _count_live=()
+  # Spravovaná nearchivovaná repa mimo migraci (repoName → "key\tghName")
+  # pro kontrolu PR bez žádosti o review po hlavní smyčce.
+  local -A _managed=()
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX GH_PROJECT_TOPIC_PREFIX || return 1
   _gh-governance-run-sha >/dev/null || return 1
   _listing=$(_gh-governance-org-repos-list) || {
@@ -523,6 +527,8 @@ _gh-governance-reconcile-run() {
           _pointer=$(_gh-governance-state-read "$_name" 2>/dev/null) || _pointer=""
           # ghName odříznutím z názvu (tvar garantuje klasifikace spravovane).
           _gh_name="${_name#"${GH_REPO_PREFIX}-${_key}-"}"
+          [[ ",$_topics," == *",${_BB_MIGRATION_TOPIC_MARKER},"* ]] || \
+            _managed["$_name"]="${_key}"$'\t'"${_gh_name}"
           _err_file=$(mktemp) || return 1
           if ! _gh-governance-reconcile-repo "$_name" "$_branch" "$_key" "$_gh_name" 2>"$_err_file"; then
             _gh-governance-report-add error "neuspesna reconciliace repa" \
@@ -561,7 +567,15 @@ _gh-governance-reconcile-run() {
             "$_subset repa: $_n ≥ $GH_GOVERNANCE_CAPACITY_WARN (blíží se limit axiomu)" ;;
       esac
     done
+    # Vrstva 2 jistoty doručení: projekt bez pr_reviewers_team.
+    _gh-governance-pr-review-project-check "$_key"
   done
+
+  # Vrstva 3 jistoty doručení: otevřené PR spravovaných rep bez žádosti
+  # o review — bot požádá pr_reviewers_team, resp. hlásí (jeden search dotaz).
+  _gh-governance-reconcile-pr-review _managed || \
+    _gh-governance-report-add error "kontrola pr bez zadosti selhala" "$GITHUB_ORG" \
+      "search dotaz na otevřené PR organizace selhal — PR bez žádosti o review se dnes nekontrolovaly"
 
   # Přestavba completion manifestu z už načteného listingu (žádné další API)
   # a navazující kontroly nad týmž listingem; vše jede jedním pushem níže.

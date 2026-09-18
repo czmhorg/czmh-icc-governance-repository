@@ -133,6 +133,12 @@ _GH_PROJECT_KEY_REGEX='^[a-z0-9]+$'
 # fetchem toolkit repa (kontrola verze skriptů; výchozí 1440 = jednou denně).
 : "${GH_VERSION_CHECK_TTL_MIN:=1440}"
 
+# Hlášení čekajících PR ve funkcích gh-* („Máš 1 schválený PR k merge, 2 PR
+# čekají na tvoje review → gh-pr-list"; docs/navrh/gh-pr-funkce.md): maximální
+# stáří cache počtů v minutách před obnovou na pozadí a zároveň nejmenší
+# odstup dvou stejných hlášení v jednom shellu. 0 = hlášení vypnuto.
+: "${GH_PR_NOTICE_TTL_MIN:=10}"
+
 # Kořen lokálního zrcadla pro vyhledávání v kódu projektů (gh-functions-search.sh).
 # Struktura: ${GH_SEARCH_MIRROR_DIR}/{projectKey}/{active|archived}/{ghRepoName}.git
 # Obsah je dopočitatelná cache (bare + shallow klony výchozích větví) — lze
@@ -944,6 +950,10 @@ _gh-require-current-version() {
       return 1
       ;;
   esac
+  # Háček hlášení čekajících PR: brána je společný vstup všech pracovních
+  # funkcí gh-* (přímo i přes _gh-confd-sync); definici má jen
+  # gh-functions-user.sh, bb-migrate.sh ji nemá → nic.
+  declare -F _gh-pr-pending-notice >/dev/null && _gh-pr-pending-notice
   return 0
 }
 

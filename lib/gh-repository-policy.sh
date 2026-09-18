@@ -546,8 +546,10 @@ _gh-repository-policy-teams-check() {
   local _teams_match=true
   local -A _observed_team_map=()
   _expected_teams=$(_gh-repository-policy-expected-teams "$_key" "$_gh_name") || return 1
+  # stderr gh se propaguje – volající (audit, migrace, reconcile) hlásí jen
+  # název kroku, příčinu (HTTP 403/404 = práva účtu na repu) musí vidět uživatel.
   _observed_teams=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "repos/$_repo_path/teams" \
-    --paginate --jq '.[] | [.slug, .permission] | @tsv' 2>/dev/null) || return 1
+    --paginate --jq '.[] | [.slug, .permission] | @tsv') || return 1
   while IFS=$'\t' read -r _team _permission; do
     [[ -n "$_team" ]] && _observed_team_map["$_team"]="$(_gh-perm-to-api "$_permission")"
   done <<< "$_observed_teams"
@@ -653,19 +655,26 @@ _gh-repository-policy-check() {
   # Check policy: týmy → rulesety (sémantické porovnání + smoke-test) →
   # Jenkins collaborator → governance bot collaborator (admin) → custom
   # properties (MHN dle conf.d, Deployment_Target nastavená).
-  # Výsledek OK/DIFF/ERROR a detail (první rozdíl) přes nameref. Očekávaný
-  # stav = efektivní konfigurace repa (projekt + nastavení repa).
+  # Výsledek OK/DIFF/ERROR a detail přes nameref: u DIFF první rozdíl, u ERROR
+  # název kroku, který selhal (příčinu – hlášku gh/konfigurace – vypsal krok
+  # sám na stderr). Očekávaný stav = efektivní konfigurace repa (projekt +
+  # nastavení repa).
   # Použití: _gh-repository-policy-check <repo_path> <branch> <key> <ghName> <result_name> <detail_name>
   local _repo_path="$1" _branch="$2" _key="$3" _gh_name="$4" _result_name="$5" _detail_name="$6"
   local _login _configured _decision _teams _rulesets _collaborator _bot _props
   declare -n _result_ref="$_result_name" _detail_ref="$_detail_name"
-  _result_ref=ERROR; _detail_ref="policy check failed"
+  _result_ref=ERROR; _detail_ref="policy configuration check failed"
   _require_vars GH_GOVERNANCE_BOT_USER || return 0
   _gh-jenkins-policy-resolve "$_key" "$_gh_name" _login _configured _decision || return 0
+  _detail_ref="teams check failed"
   _teams=$(_gh-repository-policy-teams-check "$_repo_path" "$_key" "$_gh_name") || return 0
+  _detail_ref="rulesets check failed"
   _rulesets=$(_gh-ruleset-check "$_repo_path" "$_branch" "$_key" "$_gh_name" "$_login") || return 0
+  _detail_ref="Jenkins collaborator check failed"
   _collaborator=$(_gh-repository-policy-collaborator-check "$_repo_path" "$_login" "$_decision" push) || return 0
+  _detail_ref="governance bot collaborator check failed"
   _bot=$(_gh-repository-policy-collaborator-check "$_repo_path" "$GH_GOVERNANCE_BOT_USER" allowed admin) || return 0
+  _detail_ref="properties check failed"
   _props=$(_gh-repository-policy-properties-check "$_repo_path" "$_key") || return 0
 
   _result_ref=OK; _detail_ref=-
