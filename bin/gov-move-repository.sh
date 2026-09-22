@@ -84,7 +84,7 @@ case "$_gov_mv_mode" in
     fi
     declare -A _gov_mv_sum=()
     if _gh-governance-move-run "${_gov_mv_pos[0]}" "${_gov_mv_pos[1]}" \
-        "${_gov_mv_pos[2]}" "${_gov_mv_pos[3]}" _gov_mv_sum; then
+        "${_gov_mv_pos[2]}" "${_gov_mv_pos[1]}" "${_gov_mv_pos[3]}" _gov_mv_sum; then
       _gh-governance-issue-close-done "${_gov_mv_pos[4]}" \
         "$(_gh-governance-move-comment _gov_mv_sum)"
     elif [[ -n "${_gov_mv_sum[error_type]:-}" ]]; then
@@ -107,7 +107,7 @@ case "$_gov_mv_mode" in
     fi
     declare -A _gov_mv_sum=()
     if _gh-governance-move-run "${_gov_mv_pos[0]}" "${_gov_mv_pos[1]}" \
-        "${_gov_mv_pos[2]}" "$_gov_mv_redirect" _gov_mv_sum; then
+        "${_gov_mv_pos[2]}" "${_gov_mv_pos[1]}" "$_gov_mv_redirect" _gov_mv_sum; then
       _gh-governance-move-comment _gov_mv_sum
     else
       exit 1

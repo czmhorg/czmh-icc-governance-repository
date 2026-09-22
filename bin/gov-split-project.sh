@@ -96,7 +96,7 @@ for _gov_sp_row in "${_gov_sp_rows[@]}"; do
   _gov_sp_state=""
   declare -A _gov_sp_info=()
   if ! _gh-governance-move-detect "$_gov_sp_project" "$_gov_sp_name" "$_gov_sp_dst" \
-      _gov_sp_state _gov_sp_info; then
+      "$_gov_sp_name" _gov_sp_state _gov_sp_info; then
     _gov-sp-summary "## $_gov_sp_name" "" "**CHYBA**: detekce stavu selhala – běh ukončen."
     exit 1
   fi
@@ -109,7 +109,7 @@ for _gov_sp_row in "${_gov_sp_rows[@]}"; do
   fi
   declare -A _gov_sp_sum=()
   if ! _gh-governance-move-run "$_gov_sp_project" "$_gov_sp_name" "$_gov_sp_dst" \
-      "$_gov_sp_redirect" _gov_sp_sum; then
+      "$_gov_sp_name" "$_gov_sp_redirect" _gov_sp_sum; then
     # Fail-fast: stav je restartovatelný, nový dispatch naváže.
     _gov-sp-summary "## $_gov_sp_name" "" \
       "**CHYBA**: přesun selhal (${_gov_sp_sum[error_type]:-provozní chyba}) – běh ukončen; po nápravě spusť workflow znovu."

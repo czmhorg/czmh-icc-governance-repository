@@ -35,8 +35,12 @@ _gh-jenkins-policy-resolve() {
 
 _gh-api-input-retry() {
   # Pošle JSON payload na GH API endpoint s retry 5×2 s na přechodné chyby.
-  # Použití: _gh-api-input-retry <endpoint> <metoda> <payload> <popis pro hlášky>
-  local _endpoint="$1" _method="$2" _payload="$3" _label="$4"
+  # Volitelný <text definitivní chyby> (literál hledaný v chybovém výstupu gh):
+  # při shodě se neopakuje, nic se nevypisuje a vrací se 2 – rozhodnutí
+  # o hlášce nechává volajícímu (např. 409 „already set at the organization
+  # or enterprise level", docs/github/actions-permissions-org-selected-409.md).
+  # Použití: _gh-api-input-retry <endpoint> <metoda> <payload> <popis pro hlášky> [<text definitivní chyby>]
+  local _endpoint="$1" _method="$2" _payload="$3" _label="$4" _final_text="${5:-}"
   local _attempt _error _error_file
   _error_file=$(mktemp) || return 1
 
@@ -51,6 +55,10 @@ _gh-api-input-retry() {
     fi
 
     _error=$(< "$_error_file")
+    if [[ -n "$_final_text" ]] && grep -qF -- "$_final_text" <<< "$_error"; then
+      rm -f "$_error_file"
+      return 2
+    fi
     if [[ "$_attempt" == 5 ]]; then
       [[ -n "$_error" ]] && printf '%s\n' "$_error" >&2
       rm -f "$_error_file"

@@ -13,8 +13,8 @@ nastavení, aniž by cokoli musel kdokoli nastavovat ručně:
 - **Jednotná pravidla** — každý spravovaný repozitář dostává týmy a jejich
   práva, ochranu větví (rulesety `mh-policy-*`), povinné custom properties
   a topic projektu (`ghp-<projekt>`) podle konfigurace v tomto repu.
-- **Životní cyklus repozitářů** — založení, archivaci, obnovení nebo přesun
-  repozitáře provádí automatika tohoto repa na základě žádosti (issue);
+- **Životní cyklus repozitářů** — založení, archivaci, obnovení, přesun nebo
+  přejmenování repozitáře provádí automatika tohoto repa na základě žádosti (issue);
   uživatelé žádosti podávají pohodlně funkcemi `gh-*` (viz níže).
 - **Denní kontrola konzistence (reconcile)** — automatika denně porovnává
   skutečný stav repozitářů s konfigurací, drift opravuje a odchylky hlásí

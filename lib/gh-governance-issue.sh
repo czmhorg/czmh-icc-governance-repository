@@ -3,11 +3,12 @@
 
 # Bezpečné parsování a autorizace issue pro workflows gov repa
 # (new/archive/unarchive-repository; návrh plan-implementace-governance-poc.md,
-# bod C), move-repository (docs/implementovano/navrh/rozdeleni-projektu.md) a track-delete
+# bod C), move-repository (docs/implementovano/navrh/rozdeleni-projektu.md),
+# rename-repository (docs/navrh/gh-rename.md) a track-delete
 # (defs/defs-governance-repo.md). Tělo issue = řádky project_key=... a
-# repo_name=... (move-repo navíc new_project_key=... a volitelný
-# redirect=keep; track-delete: repo_path=... a delete_issue=...); titulek je
-# jen pro lidi. Tělo se NIKDY neinterpoluje do
+# repo_name=... (move-repo navíc new_project_key=..., rename-repo navíc
+# new_repo_name=..., oba volitelný redirect=keep; track-delete: repo_path=...
+# a delete_issue=...); titulek je jen pro lidi. Tělo se NIKDY neinterpoluje do
 # run: bloku workflow – čte se výhradně z JSON eventu ($GITHUB_EVENT_PATH)
 # přes jq; hodnoty se validují regexy před prvním použitím; žádný eval/source.
 # Modul běží jen v GitHub Actions (jq je k dispozici; lokální omezení na
@@ -206,6 +207,34 @@ _gh-governance-issue-parse-step-track-delete() {
   echo "Issue #$_number přijato: sledování zániku repa ${_td[repo_name]}."
 }
 
+_gh-governance-issue-body-collect() {
+  # Sdílená smyčka whitelistu řádků těla issue (move-repo, rename-repo): jen
+  # řádky <klíč>=<hodnota> s klíčem z povoleného seznamu, každý klíč nejvýš
+  # jednou; CR a prázdné řádky se ignorují. Hodnoty ukládá do nameref asoc.
+  # pole pod body_<klíč> (validaci hodnot dělá volající). Při odmítnutí
+  # naplní reject=unexpected_line|duplicate_key a vrátí 1.
+  # Použití: _gh-governance-issue-body-collect <body> "<klíč> <klíč> …" <assoc_name>
+  local _body="$1" _allowed=" $2 " _line _field _value
+  declare -n _bc_ref="$3"
+  while IFS= read -r _line; do
+    _line="${_line%$'\r'}"
+    [[ -z "$_line" ]] && continue
+    _field="${_line%%=*}"
+    # case s proměnným vzorem v bashi nefunguje – test nad ohraničeným seznamem.
+    if [[ "$_line" != *=* || "$_allowed" != *" $_field "* ]]; then
+      _bc_ref[reject]=unexpected_line
+      return 1
+    fi
+    _value="${_line#*=}"
+    if [[ -v _bc_ref["body_$_field"] ]]; then
+      _bc_ref[reject]=duplicate_key
+      return 1
+    fi
+    _bc_ref["body_$_field"]="$_value"
+  done <<< "$_body"
+  return 0
+}
+
 _gh-governance-move-body-parse() {
   # Naparsuje a zvaliduje tělo move-repo issue (přesun repa mezi projekty,
   # docs/implementovano/navrh/rozdeleni-projektu.md): řádky project_key=, repo_name= a
@@ -216,25 +245,11 @@ _gh-governance-move-body-parse() {
   # duplicate_key, missing_key, invalid_project_key, invalid_repo_name,
   # unknown_project, same_project, invalid_redirect.
   # Použití: local -A _p=(); _gh-governance-move-body-parse <body> _p
-  local _body="$1" _line _field _value _k
+  local _body="$1" _k
   declare -n _mv_ref="$2"
   _mv_ref=([reject]="")
-  while IFS= read -r _line; do
-    _line="${_line%$'\r'}"
-    [[ -z "$_line" ]] && continue
-    case "$_line" in
-      project_key=*|repo_name=*|new_project_key=*|redirect=*) ;;
-      *) _mv_ref[reject]=unexpected_line; return 1 ;;
-    esac
-    _field="${_line%%=*}"
-    _value="${_line#*=}"
-    if [[ -v _mv_ref["body_$_field"] ]]; then
-      _mv_ref[reject]=duplicate_key
-      return 1
-    fi
-    _mv_ref["body_$_field"]="$_value"
-  done <<< "$_body"
-
+  _gh-governance-issue-body-collect "$_body" \
+    "project_key repo_name new_project_key redirect" _mv_ref || return 1
   if [[ -z "${_mv_ref[body_project_key]:-}" || -z "${_mv_ref[body_repo_name]:-}" \
         || -z "${_mv_ref[body_new_project_key]:-}" ]]; then
     _mv_ref[reject]=missing_key
@@ -282,6 +297,96 @@ _gh-governance-move-body-parse() {
   return 0
 }
 
+_gh-governance-rename-body-parse() {
+  # Naparsuje a zvaliduje tělo rename-repo issue (přejmenování repa uvnitř
+  # projektu, docs/navrh/gh-rename.md): řádky project_key=, repo_name= a
+  # new_repo_name=, každý právě jednou, plus volitelný redirect=keep (jiná
+  # hodnota = odmítnutí). Naplní nameref klíči project_key, gh_name,
+  # repo_name, new_gh_name, new_repo_name, redirect (keep|cancel); při
+  # odmítnutí reject=<typ> a rc 1. Typy odmítnutí: unexpected_line,
+  # duplicate_key, missing_key, invalid_project_key, unknown_project,
+  # invalid_repo_name, invalid_new_repo_name, same_name, invalid_redirect,
+  # name_too_long (nové jméno prošlo regexem, ale výsledný název > 100 znaků).
+  # Použití: local -A _p=(); _gh-governance-rename-body-parse <body> _p
+  local _body="$1"
+  declare -n _rn_ref="$2"
+  _rn_ref=([reject]="")
+  _gh-governance-issue-body-collect "$_body" \
+    "project_key repo_name new_repo_name redirect" _rn_ref || return 1
+  if [[ -z "${_rn_ref[body_project_key]:-}" || -z "${_rn_ref[body_repo_name]:-}" \
+        || -z "${_rn_ref[body_new_repo_name]:-}" ]]; then
+    _rn_ref[reject]=missing_key
+    return 1
+  fi
+  if ! _gh-match "${_rn_ref[body_project_key]}" "$_GH_GOVERNANCE_PROJECT_KEY_REGEX"; then
+    _rn_ref[reject]=invalid_project_key
+    return 1
+  fi
+  if [[ -z "${_GH_CONF[projects/${_rn_ref[body_project_key]}/domain]:-}" ]]; then
+    _rn_ref[reject]=unknown_project
+    return 1
+  fi
+  if ! _gh-match "${_rn_ref[body_repo_name]}" "$_GH_GHNAME_REGEX"; then
+    _rn_ref[reject]=invalid_repo_name
+    return 1
+  fi
+  if ! _gh-match "${_rn_ref[body_new_repo_name]}" "$_GH_GHNAME_REGEX"; then
+    _rn_ref[reject]=invalid_new_repo_name
+    return 1
+  fi
+  if [[ "${_rn_ref[body_repo_name]}" == "${_rn_ref[body_new_repo_name]}" ]]; then
+    _rn_ref[reject]=same_name
+    return 1
+  fi
+  case "${_rn_ref[body_redirect]:-}" in
+    ""|keep) ;;
+    *) _rn_ref[reject]=invalid_redirect; return 1 ;;
+  esac
+  _rn_ref[repo_name]=$(_gh-governance-repo-name "${_rn_ref[body_project_key]}" \
+    "${_rn_ref[body_repo_name]}" 2>/dev/null) || {
+    _rn_ref[reject]=invalid_repo_name
+    return 1
+  }
+  # Regex nového jména prošel – selhání je jen limit délky výsledného názvu.
+  _rn_ref[new_repo_name]=$(_gh-governance-repo-name "${_rn_ref[body_project_key]}" \
+    "${_rn_ref[body_new_repo_name]}" 2>/dev/null) || {
+    _rn_ref[reject]=name_too_long
+    return 1
+  }
+  _rn_ref[project_key]="${_rn_ref[body_project_key]}"
+  _rn_ref[gh_name]="${_rn_ref[body_repo_name]}"
+  _rn_ref[new_gh_name]="${_rn_ref[body_new_repo_name]}"
+  _rn_ref[redirect]=cancel
+  [[ "${_rn_ref[body_redirect]:-}" == keep ]] && _rn_ref[redirect]=keep
+  return 0
+}
+
+_gh-governance-issue-authorize-pairs() {
+  # Autorizuje autora issue proti každé dvojici <projectKey>:<klíč> – všechny
+  # musí projít (zápůjčka existujících oprávnění; move-repo: archivers zdroje
+  # + creators cíle, rename-repo: archivers + creators téhož projektu).
+  # rc 0 = povoleno; 1 = odmítnuto (issue zavřeno not_planned typem
+  # unauthorized a do <output_path> zapsán result=rejected – volající skončí
+  # rc 0); 2 = interní chyba.
+  # Použití: _gh-governance-issue-authorize-pairs <issue_number> <output_path> <login> <projectKey:field>...
+  local _number="$1" _out="$2" _login="$3" _pair _key _field _rc
+  for _pair in "${@:4}"; do
+    _key="${_pair%%:*}"
+    _field="${_pair#*:}"
+    _gh-governance-issue-authorize "$_login" "$_key" "$_field"
+    _rc=$?
+    if [[ $_rc -eq 1 ]]; then
+      echo "Issue #$_number odmítnuto: unauthorized ($_field projektu $_key)"
+      _gh-governance-issue-close-rejected "$_number" unauthorized || return 2
+      echo "result=rejected" >> "$_out"
+      return 1
+    elif [[ $_rc -ne 0 ]]; then
+      return 2
+    fi
+  done
+  return 0
+}
+
 _gh-governance-issue-parse-step-move() {
   # Celý parse job workflow move-repository: naparsuje event
   # ($GITHUB_EVENT_PATH) a autorizuje autora DVAKRÁT – členství v týmu
@@ -293,7 +398,7 @@ _gh-governance-issue-parse-step-move() {
   # okomentuje a zavře issue not_planned a skončí rc 0; rc != 0 jen interní
   # chyba.
   # Použití: _gh-governance-issue-parse-step-move
-  local _out="${GITHUB_OUTPUT:-/dev/stdout}" _number _login _body _rc _pair _key _field
+  local _out="${GITHUB_OUTPUT:-/dev/stdout}" _number _login _body
   local -A _mv=()
   _gh-governance-issue-event-read "${GITHUB_EVENT_PATH:?}" _number _login _body || return 1
   if ! _gh-match "$_login" "$_GH_CONF_LOGIN_REGEX" || [[ "$_login" == *--* ]]; then
@@ -309,21 +414,14 @@ _gh-governance-issue-parse-step-move() {
     echo "result=rejected" >> "$_out"
     return 0
   fi
-  for _pair in "${_mv[project_key]}:repository_archivers" \
-               "${_mv[new_project_key]}:repository_creators"; do
-    _key="${_pair%%:*}"
-    _field="${_pair#*:}"
-    _gh-governance-issue-authorize "$_login" "$_key" "$_field"
-    _rc=$?
-    if [[ $_rc -eq 1 ]]; then
-      echo "Issue #$_number odmítnuto: unauthorized ($_field projektu $_key)"
-      _gh-governance-issue-close-rejected "$_number" unauthorized || return 1
-      echo "result=rejected" >> "$_out"
-      return 0
-    elif [[ $_rc -ne 0 ]]; then
-      return 1
-    fi
-  done
+  _gh-governance-issue-authorize-pairs "$_number" "$_out" "$_login" \
+    "${_mv[project_key]}:repository_archivers" \
+    "${_mv[new_project_key]}:repository_creators"
+  case $? in
+    0) ;;
+    1) return 0 ;;
+    *) return 1 ;;
+  esac
   {
     echo "result=ok"
     echo "issue_number=$_number"
@@ -335,6 +433,53 @@ _gh-governance-issue-parse-step-move() {
     echo "redirect=${_mv[redirect]}"
   } >> "$_out"
   echo "Issue #$_number přijato: přesun ${_mv[repo_name]} → ${_mv[new_repo_name]} (redirect: ${_mv[redirect]})."
+}
+
+_gh-governance-issue-parse-step-rename() {
+  # Celý parse job workflow rename-repository: naparsuje event
+  # ($GITHUB_EVENT_PATH) a autorizuje autora DVAKRÁT v témže projektu –
+  # členství v týmu z repository_archivers (staré jméno odchází z oběhu)
+  # A ZÁROVEŇ z repository_creators (nové jméno přichází; návrh
+  # gh-rename.md). Výstupy do $GITHUB_OUTPUT: result=ok + issue_number,
+  # project_key, gh_name, repo_name, new_gh_name, new_repo_name, redirect
+  # (keep|cancel); nebo result=rejected. Odmítnutí okomentuje a zavře issue
+  # not_planned a skončí rc 0; rc != 0 jen interní chyba.
+  # Použití: _gh-governance-issue-parse-step-rename
+  local _out="${GITHUB_OUTPUT:-/dev/stdout}" _number _login _body
+  local -A _rn=()
+  _gh-governance-issue-event-read "${GITHUB_EVENT_PATH:?}" _number _login _body || return 1
+  if ! _gh-match "$_login" "$_GH_CONF_LOGIN_REGEX" || [[ "$_login" == *--* ]]; then
+    echo "Issue #$_number odmítnuto: invalid_login"
+    _gh-governance-issue-close-rejected "$_number" invalid_login || return 1
+    echo "result=rejected" >> "$_out"
+    return 0
+  fi
+  if ! _gh-governance-rename-body-parse "$_body" _rn; then
+    [[ -n "${_rn[reject]}" ]] || return 1
+    echo "Issue #$_number odmítnuto: ${_rn[reject]}"
+    _gh-governance-issue-close-rejected "$_number" "${_rn[reject]}" || return 1
+    echo "result=rejected" >> "$_out"
+    return 0
+  fi
+  _gh-governance-issue-authorize-pairs "$_number" "$_out" "$_login" \
+    "${_rn[project_key]}:repository_archivers" \
+    "${_rn[project_key]}:repository_creators"
+  case $? in
+    0) ;;
+    1) return 0 ;;
+    *) return 1 ;;
+  esac
+  {
+    echo "result=ok"
+    echo "issue_number=$_number"
+    echo "project_key=${_rn[project_key]}"
+    echo "gh_name=${_rn[gh_name]}"
+    echo "repo_name=${_rn[repo_name]}"
+    echo "new_gh_name=${_rn[new_gh_name]}"
+    echo "new_repo_name=${_rn[new_repo_name]}"
+    echo "redirect=${_rn[redirect]}"
+  } >> "$_out"
+  echo "Issue #$_number přijato: přejmenování ${_rn[repo_name]} → ${_rn[new_repo_name]} (redirect: ${_rn[redirect]})."
 }
 
 _gh-governance-issue-authorize() {
@@ -373,20 +518,23 @@ _gh-governance-issue-reject-message() {
   # Použití: _gh-governance-issue-reject-message <typ>
   case "$1" in
     invalid_login)       echo "Login autora issue nemá platný formát." ;;
-    unexpected_line)     echo "Tělo issue obsahuje neočekávaný řádek – povoleny jsou pouze řádky klíčů daného typu issue (project_key= a repo_name=; u move-repo navíc new_project_key= a volitelný redirect=; u track-delete repo_path= a delete_issue=)." ;;
+    unexpected_line)     echo "Tělo issue obsahuje neočekávaný řádek – povoleny jsou pouze řádky klíčů daného typu issue (project_key= a repo_name=; u move-repo navíc new_project_key=, u rename-repo new_repo_name=, u obou volitelný redirect=; u track-delete repo_path= a delete_issue=)." ;;
     duplicate_key)       echo "Tělo issue obsahuje duplicitní klíč." ;;
-    missing_key)         echo "V těle issue chybí povinný klíč (project_key, repo_name; u move-repo i new_project_key)." ;;
+    missing_key)         echo "V těle issue chybí povinný klíč (project_key, repo_name; u move-repo i new_project_key, u rename-repo i new_repo_name)." ;;
     invalid_project_key) echo "Hodnota project_key nemá platný formát." ;;
     invalid_repo_name)   echo "Hodnota repo_name nemá platný formát (viz formát ghName v defs/defs.md) nebo je výsledný název repa delší než 100 znaků." ;;
     unknown_project)     echo "Zadaný projekt v konfiguraci conf.d neexistuje." ;;
     invalid_repo_path)   echo "Hodnota repo_path nemá platný formát <org>/<ghRepoName> spravovaného repa (viz defs/defs.md)." ;;
     invalid_delete_issue) echo "Hodnota delete_issue není platná URL issue." ;;
     same_project)        echo "Zdrojový a cílový projekt přesunu jsou shodné." ;;
+    invalid_new_repo_name) echo "Hodnota new_repo_name nemá platný formát (viz formát ghName v defs/defs.md)." ;;
+    same_name)           echo "Staré a nové jméno repa jsou shodné – není co přejmenovat." ;;
+    name_too_long)       echo "Výsledný název repa pod novým jménem je delší než 100 znaků." ;;
     invalid_redirect)    echo "Hodnota redirect smí být pouze 'keep' (ponechat redirect starého jména); bez řádku redirect= se redirect ruší." ;;
     not_managed)         echo "Repo není spravovaným repem zdrojového projektu (nebo je stav přesunu nejednoznačný – viz log běhu workflow a defs/defs.md)." ;;
-    name_taken)          echo "Nové jméno repa v cílovém projektu je už obsazené." ;;
+    name_taken)          echo "Nové jméno repa je už obsazené." ;;
     capacity_exceeded)   echo "Cílový projekt je v příslušné podmnožině (archivovaná/nearchivovaná repa) na limitu axiomu Kapacita projektu – přesun by ho porušil." ;;
-    unauthorized)        echo "Autor issue není aktivním členem žádného z oprávněných týmů projektu (přesun vyžaduje repository_archivers zdrojového a repository_creators cílového projektu)." ;;
+    unauthorized)        echo "Autor issue není aktivním členem žádného z oprávněných týmů projektu (přesun vyžaduje repository_archivers zdrojového a repository_creators cílového projektu; přejmenování repository_archivers i repository_creators téhož projektu)." ;;
     *)                   echo "Issue bylo odmítnuto (neznámý typ chyby '$1')." ;;
   esac
 }

@@ -477,6 +477,23 @@ _gh-governance-reconcile-code-drift() {
   return 0
 }
 
+_gh-governance-reconcile-labels() {
+  # Denní kontrola labelů governance issue v gov repu (lib/gh-governance-labels.sh):
+  # každý chybějící label = warning položka reportu (klient bez něj issue
+  # nezaloží, workflow se nespustí); nic se nezakládá – náprava = deploy
+  # kódu gov-sync.sh. rc 1 jen infrastruktura (výpis labelů selhal).
+  # Použití: _gh-governance-reconcile-labels
+  local _gov_repo _missing _name
+  _require_vars GITHUB_ORG GH_GOVERNANCE_REPO || return 1
+  _gov_repo="${GITHUB_ORG}/${GH_GOVERNANCE_REPO}"
+  _missing=$(_gh-governance-labels-missing "$_gov_repo") || return 1
+  while IFS= read -r _name; do
+    [[ -n "$_name" ]] || continue
+    _gh-governance-report-add warning "chybejici label gov repa" "$_gov_repo" \
+      "label '$_name' v gov repu neexistuje – klient s ním issue nezaloží; náprava = spusť gov-sync.sh (labely zakládá před nasazením kódu)"
+  done <<< "$_missing"
+}
+
 _gh-governance-reconcile-run() {
   # Celý běh reconciliace: průchod výpisem rep organizace, klasifikace,
   # per-repo reconciliace (selhání jednoho repa běh nezastaví), počty rep
@@ -617,6 +634,11 @@ _gh-governance-reconcile-run() {
   _gh-governance-reconcile-code-drift || \
     _gh-governance-report-add error "kontrola driftu kodu selhala" \
       "${GITHUB_ORG}/${GH_TOOLKIT_REPO}" "kontrola se nespustila (checkout gov repa nebo mktemp)"
+
+  # Labely governance issue v gov repu (chybějící = warning, nezakládají se).
+  _gh-governance-reconcile-labels || \
+    _gh-governance-report-add error "neuspesna reconciliace repa" \
+      "${GITHUB_ORG}/${GH_GOVERNANCE_REPO}" "výpis labelů gov repa selhal – labely governance issue se dnes nekontrolovaly"
 
   # Jeden commit+push posunutých ukazatelů na konci běhu; selhání pushe je
   # error v reportu, aplikované změny se nevrací (ukazatel smí být „starší").
