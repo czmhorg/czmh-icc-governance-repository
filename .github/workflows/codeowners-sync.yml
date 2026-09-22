@@ -11,8 +11,9 @@
 #     – sync jen konverguje obsah rep k conf.d. Issue se vždy zavře completed
 #     s reportem v komentáři; rc 1 při error položce (viditelnost na běhu).
 #   - push do conf.d/projects/** ve výchozí větvi gov repa: dotčené projekty
-#     se odvodí z cest změněných souborů (before..HEAD); neznámý/nulový before
-#     = všechny projekty. Report jen do souhrnu běhu.
+#     se odvodí z cest změněných souborů (before..HEAD, HEAD = aktuální
+#     výchozí větev, ne commit pushe); neznámý/nulový before = všechny
+#     projekty. Report jen do souhrnu běhu.
 # Concurrency: issue běhy per projekt (group codeowners-sync-<key>); push běhy
 # každý vlastní skupinu (github.sha) – ve skupině je nejvýš 1 running +
 # 1 pending a nový příchozí pending zruší (docs/github/actions-concurrency.md),
@@ -70,8 +71,13 @@ jobs:
     concurrency:
       group: codeowners-sync-${{ needs.parse.outputs.project_key || github.sha }}
     steps:
+      # Vždy HEAD výchozí větve, ne github.sha pushe: běhy dvou rychlých merge
+      # se mohou vykonat v opačném pořadí a starší běh by zapsal starší
+      # konfiguraci (ověřeno v pískovišti, docs/github/actions-checkout-sha-poradi-behu.md).
+      # Rozsah diffu před-SHA..HEAD tím jen roste (nadmnožina nevadí).
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           token: ${{ secrets.GOV_BOT_TOKEN }}
       - name: Distribuce CODEOWNERS

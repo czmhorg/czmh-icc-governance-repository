@@ -118,7 +118,8 @@ case "$_gov_cs_mode" in
     _gov-cs-render "$_gov_cs_report"
     _gov_cs_run_url="${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}"
     _gov_cs_comment="Distribuce CODEOWNERS projektu '${_gov_cs_pos[0]}' dokončena ($(_gh-governance-report-header "$_gov_cs_report"))."
-    _gov_cs_comment+=$'\n\n'"$(_gh-governance-report-render "$_gov_cs_report" | tail -n +2)"
+    # Render bez souhrnu počtů (řádek 1, je v hlavičce) a prázdného řádku za ním.
+    _gov_cs_comment+=$'\n\n'"$(_gh-governance-report-render "$_gov_cs_report" | tail -n +3)"
     _gov_cs_comment+=$'\n\n'"Běh workflow: $_gov_cs_run_url"
     _gh-governance-issue-close-done "${_gov_cs_pos[1]}" "$_gov_cs_comment" || exit 1
     _gov-cs-exit-by-report "$_gov_cs_report"
