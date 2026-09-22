@@ -184,19 +184,37 @@ _gh-governance-wait-for-branch() {
   done
 }
 
+_gh-governance-wait-for-default-branch() {
+  # Počká, až GET /repos vrací default_branch == <branch>, 5 × 2 s: po
+  # POST branches/{old}/rename existuje ref nové větve prakticky hned, ale
+  # pole default_branch se přepne se zpožděním (ověřeno v pískovišti,
+  # docs/github/repo-create-auto-init-prazdne-repo.md).
+  # Použití: _gh-governance-wait-for-default-branch <repo_path> <branch>
+  local _repo_path="$1" _branch="$2" _attempt
+  local -A _wdb_info=()
+  for _attempt in 1 2 3 4 5; do
+    _gh-governance-repo-info "$_repo_path" _wdb_info || return 1
+    [[ "${_wdb_info[default_branch]}" == "$_branch" ]] && return 0
+    if [[ "$_attempt" == 5 ]]; then
+      echo "Chyba: Výchozí větev repa '$_repo_path' je '${_wdb_info[default_branch]}', očekáváno '$_branch' (přejmenování nedoběhlo)." >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
 _gh-governance-default-branch-apply() {
   # Uplatní klíč default_branch (defs/defs.md) při založení repa: cíl dle
   # _gh-conf-default-branch (nastavení repa > projekt > nezasahovat); prázdný
   # cíl nebo shoda s aktuální větví = nic. <created>=true → POST
   # branches/{old}/rename (asynchronní, admin práva bota), čekání na nový ref
-  # a kontrola default_branch == cíl; <branch_ref> se přepíše na cíl.
+  # a na default_branch == cíl; <branch_ref> se přepíše na cíl.
   # <created>=false (konvergence existujícího repa) → bez API, jen věta
   # „ponechána“. <note_ref> = věta pro výstup operace a komentář issue
   # (prázdná = bez zásahu).
   # Použití: _gh-governance-default-branch-apply <repo_path> <key> <ghName> <true|false> <branch_ref> <note_ref>
   local _repo_path="$1" _key="$2" _name="$3" _created="$4" _target _source _src_label
   declare -n _dba_branch="$5" _dba_note="$6"
-  local -A _dba_info=()
   _dba_note=""
   _gh-conf-default-branch "$_key" "$_name" _target _source
   [[ -n "$_target" && "$_target" != "$_dba_branch" ]] || return 0
@@ -208,11 +226,7 @@ _gh-governance-default-branch-apply() {
   _gh-api-input-retry "repos/$_repo_path/branches/$(_url_encode_path "$_dba_branch")/rename" POST \
     "{\"new_name\":\"$_target\"}" "přejmenování výchozí větve na '$_target'" || return 1
   _gh-governance-wait-for-branch "$_repo_path" "$_target" rename || return 1
-  _gh-governance-repo-info "$_repo_path" _dba_info || return 1
-  if [[ "${_dba_info[default_branch]}" != "$_target" ]]; then
-    echo "Chyba: Výchozí větev repa '$_repo_path' je '${_dba_info[default_branch]}', očekáváno '$_target' (přejmenování nedoběhlo)." >&2
-    return 1
-  fi
+  _gh-governance-wait-for-default-branch "$_repo_path" "$_target" || return 1
   _dba_branch="$_target"
   case "$_source" in
     repo) _src_label="nastavení repa conf.d/projects/$_key/$_name.conf" ;;
