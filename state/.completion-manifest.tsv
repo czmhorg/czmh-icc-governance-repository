@@ -1,10 +1,10 @@
 co-a	govtest1	false
-co-b	govtest1	true
 ctvrta-app	govtest1	false
 divoke	govtest1	false
 multi	govtest1	true
 pata-app	govtest1	false
 adopt	govtest2	false
+co-b	govtest2	true
 druha-app	govtest2	false
 prvni-app	govtest2	false
 treti-app	govtest2	false
