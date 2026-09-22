@@ -78,11 +78,13 @@ _gov-entry-main() {
   #   --parse                                     parse job (issue event),
   #   --execute <projectKey> <ghName> <issueNum>  execute job (komentář+close).
   # Komentář close u new-repository doplní řádek o použitém nastavení repa
-  # (defs/defs.md – nastavení repa; jen když soubor existuje).
+  # (defs/defs.md – nastavení repa; jen když soubor existuje) a větu
+  # o výchozí větvi dle klíče default_branch (nameref z _gh-governance-new;
+  # prázdná = bez zásahu).
   # Použití: _gov-entry-main <op_funkce> <auth_klíč> <hláška úspěchu> [args...]
-  local _op="$1" _field="$2" _success_label="$3" _a _mode=local _url _note=""
+  local _op="$1" _field="$2" _success_label="$3" _a _mode=local _url _note="" _bnote=""
   shift 3
-  local -a _pos=()
+  local -a _pos=() _op_args=()
   for _a in "$@"; do
     case "$_a" in
       --parse)   _mode=parse ;;
@@ -104,11 +106,14 @@ _gov-entry-main() {
         echo "Chyba: --execute vyžaduje <projectKey> <ghName> <issueNumber>." >&2
         return 1
       fi
-      if "$_op" "${_pos[0]}" "${_pos[1]}"; then
+      _op_args=("${_pos[0]}" "${_pos[1]}")
+      [[ "$_op" == _gh-governance-new ]] && _op_args+=(_bnote)
+      if "$_op" "${_op_args[@]}"; then
         _url="https://${GITHUB_ORG_HOSTNAME}/${GITHUB_ORG}/$(_gh-governance-repo-name "${_pos[0]}" "${_pos[1]}")"
         [[ "$_op" == _gh-governance-new ]] && \
           _note=$(_gh-governance-repo-settings-note "${_pos[0]}" "${_pos[1]}" used)
-        _gh-governance-issue-close-done "${_pos[2]}" "$_success_label: $_url${_note:+$'\n'$_note}"
+        _gh-governance-issue-close-done "${_pos[2]}" \
+          "$_success_label: $_url${_note:+$'\n'$_note}${_bnote:+$'\n'$_bnote}"
       else
         # Provozní selhání: issue zůstává otevřené, workflow spadne (viditelnost).
         GH_HOST="$GITHUB_ORG_HOSTNAME" gh issue comment "${_pos[2]}" \

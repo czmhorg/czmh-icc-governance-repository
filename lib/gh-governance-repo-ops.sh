@@ -166,15 +166,75 @@ _gh-governance-repo-settings-note() {
   esac
 }
 
+_gh-governance-wait-for-branch() {
+  # Počká, až větev repa skutečně existuje (git/ref/heads/<branch>), 5 × 2 s
+  # – auto_init commit i přejmenování větve vznikají asynchronně.
+  # <popis> jde do chybové hlášky (auto_init | rename).
+  # Použití: _gh-governance-wait-for-branch <repo_path> <branch> <popis>
+  local _repo_path="$1" _branch="$2" _label="$3" _attempt
+  for _attempt in 1 2 3 4 5; do
+    GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
+      "repos/$_repo_path/git/ref/heads/$(_url_encode_path "$_branch")" \
+      >/dev/null 2>&1 && return 0
+    if [[ "$_attempt" == 5 ]]; then
+      echo "Chyba: Větev '$_branch' repa '$_repo_path' nevznikla ($_label)." >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+_gh-governance-default-branch-apply() {
+  # Uplatní klíč default_branch (defs/defs.md) při založení repa: cíl dle
+  # _gh-conf-default-branch (nastavení repa > projekt > nezasahovat); prázdný
+  # cíl nebo shoda s aktuální větví = nic. <created>=true → POST
+  # branches/{old}/rename (asynchronní, admin práva bota), čekání na nový ref
+  # a kontrola default_branch == cíl; <branch_ref> se přepíše na cíl.
+  # <created>=false (konvergence existujícího repa) → bez API, jen věta
+  # „ponechána“. <note_ref> = věta pro výstup operace a komentář issue
+  # (prázdná = bez zásahu).
+  # Použití: _gh-governance-default-branch-apply <repo_path> <key> <ghName> <true|false> <branch_ref> <note_ref>
+  local _repo_path="$1" _key="$2" _name="$3" _created="$4" _target _source _src_label
+  declare -n _dba_branch="$5" _dba_note="$6"
+  local -A _dba_info=()
+  _dba_note=""
+  _gh-conf-default-branch "$_key" "$_name" _target _source
+  [[ -n "$_target" && "$_target" != "$_dba_branch" ]] || return 0
+  if [[ "$_created" != true ]]; then
+    _dba_note="Výchozí větev ponechána: $_dba_branch (klíč default_branch se uplatňuje jen při založení repa)."
+    return 0
+  fi
+  printf 'Přejmenovávám výchozí větev %s → %s (klíč default_branch).\n' "$_dba_branch" "$_target"
+  _gh-api-input-retry "repos/$_repo_path/branches/$(_url_encode_path "$_dba_branch")/rename" POST \
+    "{\"new_name\":\"$_target\"}" "přejmenování výchozí větve na '$_target'" || return 1
+  _gh-governance-wait-for-branch "$_repo_path" "$_target" rename || return 1
+  _gh-governance-repo-info "$_repo_path" _dba_info || return 1
+  if [[ "${_dba_info[default_branch]}" != "$_target" ]]; then
+    echo "Chyba: Výchozí větev repa '$_repo_path' je '${_dba_info[default_branch]}', očekáváno '$_target' (přejmenování nedoběhlo)." >&2
+    return 1
+  fi
+  _dba_branch="$_target"
+  case "$_source" in
+    repo) _src_label="nastavení repa conf.d/projects/$_key/$_name.conf" ;;
+    *)    _src_label="projekt $_key" ;;
+  esac
+  _dba_note="Výchozí větev: $_target (zdroj: $_src_label)."
+  return 0
+}
+
 _gh-governance-new() {
   # Založí (nebo konverguje existující) spravované repo projektu: create
   # s auto_init (větev musí existovat před rulesety, viz
-  # docs/github/repo-create-auto-init-prazdne-repo.md), topic ghp-<key>,
-  # aplikace policy, odebrání týmů dle ukazatele, posun ukazatele + push.
-  # Existující repo není chyba – provede se jen konvergence.
-  # Použití: _gh-governance-new <projectKey> <ghName>
-  local _key="$1" _name="$2" _mhn _repo_name _repo_path _branch _attempt
-  local _adopted=false _removed_login=""
+  # docs/github/repo-create-auto-init-prazdne-repo.md), přejmenování výchozí
+  # větve dle klíče default_branch (jen u nově založeného repa,
+  # _gh-governance-default-branch-apply), topic ghp-<key>, aplikace policy,
+  # odebrání týmů dle ukazatele, posun ukazatele + push.
+  # Existující repo není chyba – provede se jen konvergence (větev se
+  # nepřejmenovává). Volitelný <note_ref> dostane větu o výchozí větvi
+  # (prázdná = bez zásahu) pro komentář issue; na stdout se vypíše vždy.
+  # Použití: _gh-governance-new <projectKey> <ghName> [<note_ref>]
+  local _key="$1" _name="$2" _mhn _repo_name _repo_path _branch
+  local _adopted=false _removed_login="" _created=false _branch_note=""
   local -a _removed=()
   local -A _info=()
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX GH_PROJECT_TOPIC_PREFIX GH_NEW_REPO_VISIBILITY || return 1
@@ -208,6 +268,7 @@ _gh-governance-new() {
     _gh-api-input-retry "orgs/$GITHUB_ORG/repos" POST \
       "{\"name\":\"$_repo_name\",\"visibility\":\"$GH_NEW_REPO_VISIBILITY\",\"auto_init\":true}" \
       "založení repa '$_repo_path'" || return 1
+    _created=true
   fi
 
   _gh-governance-repo-info "$_repo_path" _info || return 1
@@ -217,16 +278,11 @@ _gh-governance-new() {
     return 1
   fi
   # auto_init commit může chvíli vznikat – počkej, až větev skutečně existuje.
-  for _attempt in 1 2 3 4 5; do
-    GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
-      "repos/$_repo_path/git/ref/heads/$(_url_encode_path "$_branch")" \
-      >/dev/null 2>&1 && break
-    if [[ "$_attempt" == 5 ]]; then
-      echo "Chyba: Výchozí větev '$_branch' repa '$_repo_path' nevznikla (auto_init)." >&2
-      return 1
-    fi
-    sleep 2
-  done
+  _gh-governance-wait-for-branch "$_repo_path" "$_branch" auto_init || return 1
+  # Klíč default_branch: jen u nově založeného repa, před topicem a politikou
+  # (rulesety cílí ~DEFAULT_BRANCH; _branch jde dál jako parametr politiky).
+  _gh-governance-default-branch-apply "$_repo_path" "$_key" "$_name" "$_created" \
+    _branch _branch_note || return 1
 
   GH_HOST="$GITHUB_ORG_HOSTNAME" gh repo edit "$_repo_path" \
     --add-topic "${GH_PROJECT_TOPIC_PREFIX}${_key}" >/dev/null || return 1
@@ -241,6 +297,12 @@ _gh-governance-new() {
     echo "Odebrán Jenkins collaborator '$_removed_login' dle diffu konfigurace."
   echo "Hotovo: repo '$_repo_path' odpovídá INI konfiguraci projektu '$_key'."
   _gh-governance-repo-settings-note "$_key" "$_name" used
+  [[ -z "$_branch_note" ]] || printf '%s\n' "$_branch_note"
+  if [[ -n "${3:-}" ]]; then
+    declare -n _new_note_ref="$3"
+    _new_note_ref="$_branch_note"
+  fi
+  return 0
 }
 
 _gh-governance-archive() {

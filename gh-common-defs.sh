@@ -100,6 +100,11 @@ _GH_GHNAME_REGEX='^[a-z0-9][a-z0-9._-]*$'
 # projectKey a ghName první pomlčka za prefixem (_gh-repo-resolve). Délku
 # (max 46) hlídá governance vrstva (_GH_GOVERNANCE_PROJECT_KEY_REGEX).
 _GH_PROJECT_KEY_REGEX='^[a-z0-9]+$'
+# Formát jména výchozí větve (klíč default_branch, defs/defs.md): konzervativní
+# podmnožina `git check-ref-format` bez lomítka — parser conf.d smí jen bash
+# builtiny a hodnota jde do JSON těla `branches/{branch}/rename`. Úplnou
+# kontrolu (zákaz '..' a přípony .lock) dělá _gh-branch-name-valid.
+_GH_BRANCH_NAME_REGEX='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 
 # Kořenový adresář lokálních kopií repozitářů (workspace). Workspace funkce
 # (gh-clone, gh-cd, gh-open, gh-project-clone, gh-sync, gh-status) pracují
@@ -199,6 +204,13 @@ _gh-match() {
   # Použití: _gh-match <řetězec> <ERE regex>    (negace: ! _gh-match ...)
   local LC_ALL=C
   [[ "$1" =~ $2 ]]
+}
+
+_gh-branch-name-valid() {
+  # Platnost jména výchozí větve (klíč default_branch): _GH_BRANCH_NAME_REGEX,
+  # navíc bez '..' a bez přípony .lock (git check-ref-format). Vrací rc 0/1.
+  # Použití: _gh-branch-name-valid <jméno větve>
+  _gh-match "$1" "$_GH_BRANCH_NAME_REGEX" && [[ "$1" != *..* && "$1" != *.lock ]]
 }
 
 # ══════════════════════════════════════════════════════════════════════════════

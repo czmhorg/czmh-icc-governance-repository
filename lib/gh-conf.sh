@@ -9,7 +9,8 @@
 # jsou povoleny pouze bash builtiny, žádné spouštění externích procesů.
 # Závislosti z gh-common-defs.sh (definovány před sourcováním tohoto modulu):
 # _gh-match (sám je jen builtin [[ =~ ]] s lokálním LC_ALL=C), _GH_GHNAME_REGEX
-# (názvy souborů nastavení repa) a konfigurační proměnné GH_GOVERNANCE_REPO +
+# (názvy souborů nastavení repa), _gh-branch-name-valid + _GH_BRANCH_NAME_REGEX
+# (klíč default_branch) a konfigurační proměnné GH_GOVERNANCE_REPO +
 # GH_REPO_PREFIX (rezervovaný projectKey), GH_SECURITY_MANAGERS_TEAM.
 [[ -n "${_GH_CONF_LOADED:-}" ]] && \
   declare -F _gh-conf-load >/dev/null && return 0
@@ -39,15 +40,17 @@ _GH_CONF_PROFILE_BOOL_FIELDS="enforce_admins dismiss_stale_reviews require_code_
 # _GH_CONF_PROFILE_FIELDS — ten iteruje i _gh-ruleset-payload jako povinná pole.
 _GH_CONF_PROFILE_OPT_FIELDS="require_pull_request"
 _GH_CONF_PROJECT_FIELDS="display_name domain rulesets repository_teams repository_creators repository_archivers"
-# Klíče, které smí obsahovat nastavení repa (rulesets a pr_reviewers_team
-# přepisují hodnotu projektu, repository_teams_add přidává týmy).
-_GH_CONF_REPO_FIELDS="rulesets pr_reviewers_team repository_teams_add"
+# Klíče, které smí obsahovat nastavení repa (rulesets, pr_reviewers_team
+# a default_branch přepisují hodnotu projektu, repository_teams_add přidává týmy).
+_GH_CONF_REPO_FIELDS="rulesets pr_reviewers_team default_branch repository_teams_add"
 # Rezervovaná hodnota: v rulesets = žádné rulesety mh-policy-* (položka musí
 # být jediná, profiles/none.conf je chyba); v pr_reviewers_team nastavení repa
 # = žádný tým (v projektu chyba).
 _GH_CONF_NONE=none
 # Nepovinná pole projektu; přítomný klíč musí mít neprázdnou hodnotu.
-_GH_CONF_PROJECT_OPT_FIELDS="description pr_reviewers_team"
+# default_branch = výchozí větev nově zakládaného repa (defs/defs.md),
+# formát _gh-branch-name-valid (gh-common-defs.sh).
+_GH_CONF_PROJECT_OPT_FIELDS="description pr_reviewers_team default_branch"
 # Práva v repository_teams zajišťující write — CODEOWNERS vlastníka bez write
 # GitHub ignoruje, tým v pr_reviewers_team proto musí mít některé z nich.
 _GH_CONF_PR_REVIEWERS_PERMS="push write maintain admin"
@@ -373,6 +376,7 @@ _gh-conf-validate-project() {
     [[ " $_GH_CONF_PROJECT_FIELDS $_GH_CONF_PROJECT_OPT_FIELDS " == *" $_field "* ]] || \
       _gh-conf-err "$2" "$_rel" "neznámý klíč '$_field'"
   done
+  _gh-conf-validate-default-branch "${_GH_CONF[projects/$_pk/default_branch]:-}" "$_rel" "$2"
   _domain="${_GH_CONF[projects/$_pk/domain]:-}"
   if [[ -n "$_domain" ]]; then
     if ! _gh-match "$_domain" "$_GH_CONF_DOMAIN_REF_REGEX"; then
@@ -402,6 +406,16 @@ _gh-conf-validate-project() {
   [[ -z "$_value" ]] || _gh-conf-validate-csv "$_value" "$_GH_CONF_NAME_REGEX" "$_rel" repository_archivers "$2"
   [[ ! -v _GH_CONF["projects/$_pk/rulesets"] ]] || \
     _gh-conf-validate-rulesets "${_GH_CONF[projects/$_pk/rulesets]}" "$_rel" "$_domain" "$2" "$3" "$4"
+  return 0
+}
+
+_gh-conf-validate-default-branch() {
+  # Zvaliduje hodnotu klíče default_branch (defs/defs.md) projektu i nastavení
+  # repa; prázdná hodnota = klíč chybí (prázdný přítomný klíč hlásí volající).
+  # Použití: _gh-conf-validate-default-branch <hodnota> <rel> <errors_ref>
+  [[ -z "$1" ]] && return 0
+  _gh-branch-name-valid "$1" || _gh-conf-err "$3" "$2" \
+    "klíč 'default_branch' má neplatné jméno větve '$1' (povolený formát: $_GH_BRANCH_NAME_REGEX, bez '..' a přípony .lock)"
   return 0
 }
 
@@ -463,6 +477,7 @@ _gh-conf-validate-repo() {
     _gh-conf-effective "$_pk" "$_gh_name" repository_teams _teams
     _gh-conf-validate-pr-reviewers "$_value" "$_teams" "$_rel" 1 "$3"
   fi
+  _gh-conf-validate-default-branch "${_GH_CONF[$_prefix/default_branch]:-}" "$_rel" "$3"
   return 0
 }
 
@@ -485,8 +500,8 @@ _gh-conf-repo-settings-keys() {
 
 _gh-conf-effective() {
   # Naplní nameref efektivní hodnotou klíče repa (defs/defs.md, nastavení
-  # repa): rulesets a pr_reviewers_team = hodnota nastavení repa, jinak
-  # projektu (pr_reviewers_team=none → prázdný řetězec = žádný tým);
+  # repa): rulesets, pr_reviewers_team a default_branch = hodnota nastavení
+  # repa, jinak projektu (pr_reviewers_team=none → prázdný řetězec = žádný tým);
   # repository_teams = CSV projektu + repository_teams_add (bez dedup —
   # překryv zakazuje validátor); ostatní pole = hodnota projektu. Prázdný
   # <ghName> = hodnota projektu (projektové výpisy, admin tým projektu).
@@ -504,12 +519,33 @@ _gh-conf-effective() {
       _add="${_GH_CONF[$_r/repository_teams_add]:-}"
       [[ -z "$_add" ]] || _ce_out+="${_ce_out:+,}$_add"
       ;;
-    rulesets|pr_reviewers_team)
+    rulesets|pr_reviewers_team|default_branch)
       [[ -v _GH_CONF["$_r/$_field"] ]] || return 0
       _ce_out="${_GH_CONF[$_r/$_field]}"
       [[ "$_field" == pr_reviewers_team && "$_ce_out" == "$_GH_CONF_NONE" ]] && _ce_out=""
       ;;
   esac
+  return 0
+}
+
+_gh-conf-default-branch() {
+  # Cílová výchozí větev nově zakládaného repa (defs/defs.md, default_branch)
+  # a její zdroj: <source_ref> = repo (nastavení repa) | project | none;
+  # <value_ref> = jméno větve, při none prázdné. Offline nad _GH_CONF,
+  # hodnoty nevaliduje (prošly parserem). Jedno místo priority nastavení
+  # repa > projekt > nezasahovat — používá klient gh-new i workflow.
+  # Použití: _gh-conf-default-branch <key> <ghName> <value_ref> <source_ref>
+  declare -n _cdb_value="$3" _cdb_source="$4"
+  if [[ -v _GH_CONF["repos/$1/$2/default_branch"] ]]; then
+    _cdb_value="${_GH_CONF[repos/$1/$2/default_branch]}"
+    _cdb_source=repo
+  elif [[ -n "${_GH_CONF[projects/$1/default_branch]:-}" ]]; then
+    _cdb_value="${_GH_CONF[projects/$1/default_branch]}"
+    _cdb_source=project
+  else
+    _cdb_value=""
+    _cdb_source=none
+  fi
   return 0
 }
 
