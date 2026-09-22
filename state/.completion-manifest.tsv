@@ -5,7 +5,6 @@ pata-app	govtest1	false
 adopt	govtest2	false
 co-a2	govtest2	false
 co-b	govtest2	false
-co-c	govtest2	false
 druha-app	govtest2	false
 prvni-app	govtest2	false
 treti-app	govtest2	false
