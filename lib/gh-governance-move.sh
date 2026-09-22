@@ -445,8 +445,13 @@ _gh-governance-move-run() {
   fi
   # Ukazatel před aplikací policy (do zápisu state/ níže je pod starým
   # jménem; po restartu už pryč = prázdný = info) – heuristika úrovně hlášení
-  # správy CODEOWNERS.
-  _pointer=$(_gh-governance-state-read "$_old_name" 2>/dev/null) || _pointer=""
+  # správy CODEOWNERS. Jen u přejmenování: heuristika odvozuje „starého“
+  # vlastníka z konfigurace cílové dvojice na SHA ukazatele, ale při přesunu
+  # nese sekce vlastníka zdrojového projektu — změna je legitimní, ne ruční
+  # zásah (ověřeno v pískovišti), proto přesun jde bez ukazatele (= info).
+  if [[ "$_op" == rename ]]; then
+    _pointer=$(_gh-governance-state-read "$_old_name" 2>/dev/null) || _pointer=""
+  fi
   _gh-governance-move-apply-policy "$_new_path" "$_old_name" "$_branch" "$_src" "$_src_name" \
     "$_dst" "$_dst_name" _removed _adopted _removed_login || return 1
   _gh-governance-move-warnings "$_new_path" "$_dst" "$_dst_name" _warn || return 1
