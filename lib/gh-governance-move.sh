@@ -378,7 +378,8 @@ _gh-governance-move-run() {
   # (workflow rename-repository; dstKey == srcKey). Kroky dle návrhů:
   # validace → (dearchivace) → rename → přepnutí topicu (jen přesun) →
   # politika cílové dvojice + upozornění → CODEOWNERS pod novým jménem
-  # (nearchivované repo; selhání = jen text v summary) → (zrušení
+  # (i archivované repo – je dočasně dearchivované; selhání = jen text
+  # v summary) → (zrušení
   # redirectu) → (zpětná archivace) → přesun ukazatele state/ a řádku
   # manifestu jedním commitem.
   # Idempotentní: navazuje na rozpracovaný stav (detect). Nameref summary
@@ -457,14 +458,12 @@ _gh-governance-move-run() {
   _gh-governance-move-warnings "$_new_path" "$_dst" "$_dst_name" _warn || return 1
   # CODEOWNERS pod novým jménem dle efektivní konfigurace cílové dvojice.
   # Topics = stav před swapem (nese ghp-<src>) – apply-note testuje jen topic
-  # migrace. Archivované repo se níže zpět archivuje (Contents API by pak
-  # selhalo) a reconcile ho přeskakuje → jen text, dorovná dearchivace.
-  if [[ "$_archived" == true ]]; then
-    _co_note="CODEOWNERS: nezapsáno (repo archivované; dorovná se při dearchivaci)"
-  else
-    _gh-governance-codeowners-apply-note "$_new_name" "$_branch" "$_dst" \
-      "${_info[topics]}" "$_pointer" _co_note
-  fi
+  # migrace. I archivované repo: v tuto chvíli je dearchivované (zpětná
+  # archivace až níže), Contents API projde; reconcile archivovaná repa
+  # přeskakuje, takže sekce by jinak zůstala stará až do dearchivace a ta
+  # by ji hlásila jako ruční zásah (ukazatel už pod cílovou dvojicí).
+  _gh-governance-codeowners-apply-note "$_new_name" "$_branch" "$_dst" \
+    "${_info[topics]}" "$_pointer" _co_note
   if [[ "$_redirect" == cancel ]]; then
     # I při dokončování (half/done) – zrušení redirectu mohlo v minulém běhu
     # selhat; existující repo i chybějící redirect funkce sama idempotentně
