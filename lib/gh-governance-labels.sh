@@ -14,7 +14,7 @@
   declare -F _gh-governance-labels-ensure >/dev/null && return 0
 _GH_GOVERNANCE_LABELS_LOADED=1
 
-_GH_GOVERNANCE_LABEL_ORDER=(create-repo archive-repo unarchive-repo move-repo rename-repo track-delete reconcile-report)
+_GH_GOVERNANCE_LABEL_ORDER=(create-repo archive-repo unarchive-repo move-repo rename-repo track-delete codeowners-sync reconcile-report)
 declare -A _GH_GOVERNANCE_LABELS=(
   [create-repo]="Požadavek na založení repozitáře (workflow new-repository)"
   [archive-repo]="Požadavek na archivaci repozitáře (workflow archive-repository)"
@@ -22,6 +22,7 @@ declare -A _GH_GOVERNANCE_LABELS=(
   [move-repo]="Požadavek na přesun repozitáře do jiného projektu (workflow move-repository)"
   [rename-repo]="Požadavek na přejmenování repozitáře v projektu (workflow rename-repository)"
   [track-delete]="Sledování smazání repozitáře (workflow track-delete)"
+  [codeowners-sync]="Požadavek na distribuci CODEOWNERS projektu (workflow codeowners-sync)"
   [reconcile-report]="Denní reconcile report (workflow daily-reconcile)"
 )
 

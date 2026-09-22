@@ -4,11 +4,12 @@
 # Bezpečné parsování a autorizace issue pro workflows gov repa
 # (new/archive/unarchive-repository; návrh plan-implementace-governance-poc.md,
 # bod C), move-repository (docs/implementovano/navrh/rozdeleni-projektu.md),
-# rename-repository (docs/implementovano/navrh/gh-rename.md) a track-delete
-# (defs/defs-governance-repo.md). Tělo issue = řádky project_key=... a
-# repo_name=... (move-repo navíc new_project_key=..., rename-repo navíc
-# new_repo_name=..., oba volitelný redirect=keep; track-delete: repo_path=...
-# a delete_issue=...); titulek je jen pro lidi. Tělo se NIKDY neinterpoluje do
+# rename-repository (docs/implementovano/navrh/gh-rename.md), track-delete
+# a codeowners-sync (defs/defs-governance-repo.md). Tělo issue = řádky
+# project_key=... a repo_name=... (move-repo navíc new_project_key=...,
+# rename-repo navíc new_repo_name=..., oba volitelný redirect=keep;
+# track-delete: repo_path=... a delete_issue=...; codeowners-sync: jen
+# project_key=...); titulek je jen pro lidi. Tělo se NIKDY neinterpoluje do
 # run: bloku workflow – čte se výhradně z JSON eventu ($GITHUB_EVENT_PATH)
 # přes jq; hodnoty se validují regexy před prvním použitím; žádný eval/source.
 # Modul běží jen v GitHub Actions (jq je k dispozici; lokální omezení na
@@ -205,6 +206,48 @@ _gh-governance-issue-parse-step-track-delete() {
     echo "repo_name=${_td[repo_name]}"
   } >> "$_out"
   echo "Issue #$_number přijato: sledování zániku repa ${_td[repo_name]}."
+}
+
+_gh-governance-issue-parse-step-codeowners-sync() {
+  # Celý parse job workflow codeowners-sync (defs/defs-governance-repo.md,
+  # codeowners-sync issue): naparsuje event ($GITHUB_EVENT_PATH) – tělo je
+  # jediný řádek project_key=<ghProjectKey> – a zapíše výstupy do
+  # $GITHUB_OUTPUT (result=ok + issue_number, project_key; nebo
+  # result=rejected). Bez týmové autorizace autora (jako track-delete): sync
+  # jen konverguje CODEOWNERS rep projektu k conf.d. Typy odmítnutí:
+  # invalid_login, unexpected_line, duplicate_key, missing_key,
+  # invalid_project_key, unknown_project. Odmítnutí okomentuje a zavře issue
+  # not_planned a skončí úspěšně (rc 0); rc != 0 jen interní chyba.
+  # Použití: _gh-governance-issue-parse-step-codeowners-sync
+  local _out="${GITHUB_OUTPUT:-/dev/stdout}" _event_path="${GITHUB_EVENT_PATH:?}"
+  local _number _login _body _reject="" _key=""
+  local -A _cs=()
+  _gh-governance-issue-event-read "$_event_path" _number _login _body || return 1
+  if ! _gh-match "$_login" "$_GH_CONF_LOGIN_REGEX" || [[ "$_login" == *--* ]]; then
+    _reject=invalid_login
+  elif ! _gh-governance-issue-body-collect "$_body" "project_key" _cs; then
+    _reject="${_cs[reject]:-}"
+    [[ -n "$_reject" ]] || return 1
+  elif [[ ! -v _cs[body_project_key] ]]; then
+    _reject=missing_key
+  elif ! _gh-match "${_cs[body_project_key]}" "$_GH_GOVERNANCE_PROJECT_KEY_REGEX"; then
+    _reject=invalid_project_key
+  elif [[ -z "${_GH_CONF[projects/${_cs[body_project_key]}/domain]:-}" ]]; then
+    _reject=unknown_project
+  fi
+  if [[ -n "$_reject" ]]; then
+    echo "Issue #$_number odmítnuto: $_reject"
+    _gh-governance-issue-close-rejected "$_number" "$_reject" || return 1
+    echo "result=rejected" >> "$_out"
+    return 0
+  fi
+  _key="${_cs[body_project_key]}"
+  {
+    echo "result=ok"
+    echo "issue_number=$_number"
+    echo "project_key=$_key"
+  } >> "$_out"
+  echo "Issue #$_number přijato: distribuce CODEOWNERS projektu $_key."
 }
 
 _gh-governance-issue-body-collect() {
@@ -518,9 +561,9 @@ _gh-governance-issue-reject-message() {
   # Použití: _gh-governance-issue-reject-message <typ>
   case "$1" in
     invalid_login)       echo "Login autora issue nemá platný formát." ;;
-    unexpected_line)     echo "Tělo issue obsahuje neočekávaný řádek – povoleny jsou pouze řádky klíčů daného typu issue (project_key= a repo_name=; u move-repo navíc new_project_key=, u rename-repo new_repo_name=, u obou volitelný redirect=; u track-delete repo_path= a delete_issue=)." ;;
+    unexpected_line)     echo "Tělo issue obsahuje neočekávaný řádek – povoleny jsou pouze řádky klíčů daného typu issue (project_key= a repo_name=; u move-repo navíc new_project_key=, u rename-repo new_repo_name=, u obou volitelný redirect=; u track-delete repo_path= a delete_issue=; u codeowners-sync jen project_key=)." ;;
     duplicate_key)       echo "Tělo issue obsahuje duplicitní klíč." ;;
-    missing_key)         echo "V těle issue chybí povinný klíč (project_key, repo_name; u move-repo i new_project_key, u rename-repo i new_repo_name)." ;;
+    missing_key)         echo "V těle issue chybí povinný klíč (project_key, repo_name; u move-repo i new_project_key, u rename-repo i new_repo_name; u codeowners-sync jen project_key)." ;;
     invalid_project_key) echo "Hodnota project_key nemá platný formát." ;;
     invalid_repo_name)   echo "Hodnota repo_name nemá platný formát (viz formát ghName v defs/defs.md) nebo je výsledný název repa delší než 100 znaků." ;;
     unknown_project)     echo "Zadaný projekt v konfiguraci conf.d neexistuje." ;;

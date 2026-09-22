@@ -79,9 +79,11 @@ _gov-entry-main() {
   #   --parse                                     parse job (issue event),
   #   --execute <projectKey> <ghName> <issueNum>  execute job (komentář+close).
   # Komentář close u new-repository doplní řádek o použitém nastavení repa
-  # (defs/defs.md – nastavení repa; jen když soubor existuje) a větu
-  # o výchozí větvi dle klíče default_branch (nameref z _gh-governance-new;
-  # prázdná = bez zásahu).
+  # (defs/defs.md – nastavení repa; jen když soubor existuje) a poznámku
+  # operace (nameref z _gh-governance-new: věta o výchozí větvi dle klíče
+  # default_branch, je-li zásah, + řádek CODEOWNERS; z _gh-governance-unarchive:
+  # řádek CODEOWNERS). Lokální režim nameref nepředává – operace poznámku
+  # tiskne i na stdout.
   # Použití: _gov-entry-main <op_funkce> <auth_klíč> <hláška úspěchu> [args...]
   local _op="$1" _field="$2" _success_label="$3" _a _mode=local _url _note="" _bnote=""
   shift 3
@@ -108,7 +110,9 @@ _gov-entry-main() {
         return 1
       fi
       _op_args=("${_pos[0]}" "${_pos[1]}")
-      [[ "$_op" == _gh-governance-new ]] && _op_args+=(_bnote)
+      case "$_op" in
+        _gh-governance-new|_gh-governance-unarchive) _op_args+=(_bnote) ;;
+      esac
       if "$_op" "${_op_args[@]}"; then
         _url="https://${GITHUB_ORG_HOSTNAME}/${GITHUB_ORG}/$(_gh-governance-repo-name "${_pos[0]}" "${_pos[1]}")"
         [[ "$_op" == _gh-governance-new ]] && \

@@ -6,13 +6,16 @@
 # projektu (rename-repository; návrh docs/implementovano/navrh/gh-rename.md) jedním
 # orchestrátorem nad dvojicemi (srcKey, srcName) → (dstKey, dstName): řízené
 # přejmenování + přepnutí topicu ghp-* (jen přesun) + aplikace efektivní
-# politiky cílové dvojice + přesun ukazatele state/ a řádku completion
-# manifestu; volitelné zrušení GitHub redirectu starého jména dočasným repem
+# politiky cílové dvojice + zápis CODEOWNERS pod novým jménem + přesun
+# ukazatele state/ a řádku completion manifestu; volitelné zrušení GitHub
+# redirectu starého jména dočasným repem
 # (ověřené chování: docs/github/rename-redirect-obsazeni-jmena.md).
 # Závislosti: gh-common-defs.sh, lib/gh-conf.sh, lib/gh-repository-policy.sh,
 # lib/gh-governance-state.sh (_gh-governance-*-to-remove-between),
 # lib/gh-governance-manifest.sh, lib/gh-governance-repo-ops.sh,
-# lib/gh-governance-reconcile.sh (GH_GOVERNANCE_CAPACITY_MAX).
+# lib/gh-governance-reconcile.sh (GH_GOVERNANCE_CAPACITY_MAX),
+# lib/gh-governance-codeowners.sh (_gh-governance-codeowners-apply-note –
+# zápis CODEOWNERS pod novým jménem po politice cílové dvojice).
 [[ -n "${_GH_GOVERNANCE_MOVE_LOADED:-}" ]] && \
   declare -F _gh-governance-move-run >/dev/null && return 0
 _GH_GOVERNANCE_MOVE_LOADED=1
@@ -374,18 +377,21 @@ _gh-governance-move-run() {
   # a split-project; dstName == srcName) i přejmenování repa uvnitř projektu
   # (workflow rename-repository; dstKey == srcKey). Kroky dle návrhů:
   # validace → (dearchivace) → rename → přepnutí topicu (jen přesun) →
-  # politika cílové dvojice + upozornění → (zrušení redirectu) → (zpětná
-  # archivace) → přesun ukazatele state/ a řádku manifestu jedním commitem.
+  # politika cílové dvojice + upozornění → CODEOWNERS pod novým jménem
+  # (nearchivované repo; selhání = jen text v summary) → (zrušení
+  # redirectu) → (zpětná archivace) → přesun ukazatele state/ a řádku
+  # manifestu jedním commitem.
   # Idempotentní: navazuje na rozpracovaný stav (detect). Nameref summary
   # naplní podklady pro komentář/summary (_gh-governance-move-comment; klíč
-  # op = move|rename řídí texty); klíč error_type nese typ validačního
-  # odmítnutí (jinak provozní chyba).
+  # op = move|rename řídí texty; klíč codeowners = řádky poznámky CODEOWNERS,
+  # vždy neprázdný); klíč error_type nese typ validačního odmítnutí (jinak
+  # provozní chyba).
   # Použití: local -A _s=(); _gh-governance-move-run <srcKey> <srcName> <dstKey> <dstName> <keep|cancel> _s
   local _src="$1" _src_name="$2" _dst="$3" _dst_name="$4" _redirect="$5"
   declare -n _sum_ref="$6"
   local _state="" _archived="" _error="" _old_name _new_name _new_path _branch
   local _op=move _op_txt="přesunu" _run_sha _adopted=false _removed_login=""
-  local _delete_issue="" _redirect_result=""
+  local _delete_issue="" _redirect_result="" _pointer="" _co_note=""
   local -a _removed=()
   local -A _info=() _warn=()
   case "$_redirect" in
@@ -437,9 +443,23 @@ _gh-governance-move-run() {
     echo "Chyba: Repo '$_new_path' nemá výchozí větev." >&2
     return 1
   fi
+  # Ukazatel před aplikací policy (do zápisu state/ níže je pod starým
+  # jménem; po restartu už pryč = prázdný = info) – heuristika úrovně hlášení
+  # správy CODEOWNERS.
+  _pointer=$(_gh-governance-state-read "$_old_name" 2>/dev/null) || _pointer=""
   _gh-governance-move-apply-policy "$_new_path" "$_old_name" "$_branch" "$_src" "$_src_name" \
     "$_dst" "$_dst_name" _removed _adopted _removed_login || return 1
   _gh-governance-move-warnings "$_new_path" "$_dst" "$_dst_name" _warn || return 1
+  # CODEOWNERS pod novým jménem dle efektivní konfigurace cílové dvojice.
+  # Topics = stav před swapem (nese ghp-<src>) – apply-note testuje jen topic
+  # migrace. Archivované repo se níže zpět archivuje (Contents API by pak
+  # selhalo) a reconcile ho přeskakuje → jen text, dorovná dearchivace.
+  if [[ "$_archived" == true ]]; then
+    _co_note="CODEOWNERS: nezapsáno (repo archivované; dorovná se při dearchivaci)"
+  else
+    _gh-governance-codeowners-apply-note "$_new_name" "$_branch" "$_dst" \
+      "${_info[topics]}" "$_pointer" _co_note
+  fi
   if [[ "$_redirect" == cancel ]]; then
     # I při dokončování (half/done) – zrušení redirectu mohlo v minulém běhu
     # selhat; existující repo i chybějící redirect funkce sama idempotentně
@@ -466,10 +486,12 @@ _gh-governance-move-run() {
   _sum_ref[warn_teams]="${_warn[teams]}"
   _sum_ref[warn_rulesets]="${_warn[rulesets]}"
   _sum_ref[warn_collaborators]="${_warn[collaborators]}"
+  _sum_ref[codeowners]="$_co_note"
   [[ ${#_removed[@]} -gt 0 ]] && \
     printf 'Odebrán tým dle diffu konfigurace: %s\n' "${_removed[@]}"
   [[ -n "$_removed_login" ]] && \
     echo "Odebrán Jenkins collaborator '$_removed_login' dle diffu konfigurace."
+  printf '%s\n' "$_co_note"
   if [[ "$_op" == rename ]]; then
     echo "Hotovo: repo přejmenováno na '$_new_name' ('$_new_path')."
   else
@@ -620,6 +642,13 @@ _gh-governance-move-comment() {
     echo "- politika projektu aplikována (týmy: \`${_c_ref[expected_teams]}\`; rulesety: \`${_c_ref[rulesets]}\`; property MHN: \`${_c_ref[mhn]}\`)"
   else
     echo "- politika cílového projektu aplikována (týmy: \`${_c_ref[expected_teams]}\`; rulesety: \`${_c_ref[rulesets]}\`; property MHN: \`${_c_ref[mhn]}\`)"
+  fi
+  # Řádky poznámky CODEOWNERS (summary klíč codeowners; `:-` – testy plní
+  # summary ručně).
+  if [[ -n "${_c_ref[codeowners]:-}" ]]; then
+    while IFS= read -r _line; do
+      [[ -n "$_line" ]] && echo "- $_line"
+    done <<< "${_c_ref[codeowners]}"
   fi
   _gh-governance-move-comment-settings _c_ref
   if [[ -n "${_c_ref[removed_teams]}" ]]; then
