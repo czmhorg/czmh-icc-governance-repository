@@ -1,6 +1,6 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 # Workflow rename-repository: issue s labelem rename-repo → přejmenování
-# spravovaného repa uvnitř projektu (docs/navrh/gh-rename.md): rename +
+# spravovaného repa uvnitř projektu (docs/implementovano/navrh/gh-rename.md): rename +
 # efektivní politika pod novým jménem + přesun ukazatele state/ a řádku
 # completion manifestu; topic ghp-* se nemění. Bezpečnostní schéma shodné
 # s move-repository.yml: parse job čte event soubor (tělo issue se nikdy

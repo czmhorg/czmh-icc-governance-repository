@@ -7,7 +7,7 @@
 # dvojí autorizace v témže projektu a execute s pěti argumenty. Validační
 # odmítnutí zavírá issue not_planned s typem chyby (_gh-governance-move-run
 # vrací typ v summary[error_type]); sdílený orchestrátor volá s dstKey ==
-# srcKey (docs/navrh/gh-rename.md).
+# srcKey (docs/implementovano/navrh/gh-rename.md).
 
 if [[ "${1:-}" == "--help" ]]; then
   echo "Syntaxe: gov-rename-repository.sh <projectKey> <ghName> <newGhName> [--redirect]"

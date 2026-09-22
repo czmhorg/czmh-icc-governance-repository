@@ -3,7 +3,7 @@
 
 # Přesun repa mezi GH projekty (move-repository, split-project; návrh
 # docs/implementovano/navrh/rozdeleni-projektu.md) a přejmenování repa uvnitř
-# projektu (rename-repository; návrh docs/navrh/gh-rename.md) jedním
+# projektu (rename-repository; návrh docs/implementovano/navrh/gh-rename.md) jedním
 # orchestrátorem nad dvojicemi (srcKey, srcName) → (dstKey, dstName): řízené
 # přejmenování + přepnutí topicu ghp-* (jen přesun) + aplikace efektivní
 # politiky cílové dvojice + přesun ukazatele state/ a řádku completion

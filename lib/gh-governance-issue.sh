@@ -4,7 +4,7 @@
 # Bezpečné parsování a autorizace issue pro workflows gov repa
 # (new/archive/unarchive-repository; návrh plan-implementace-governance-poc.md,
 # bod C), move-repository (docs/implementovano/navrh/rozdeleni-projektu.md),
-# rename-repository (docs/navrh/gh-rename.md) a track-delete
+# rename-repository (docs/implementovano/navrh/gh-rename.md) a track-delete
 # (defs/defs-governance-repo.md). Tělo issue = řádky project_key=... a
 # repo_name=... (move-repo navíc new_project_key=..., rename-repo navíc
 # new_repo_name=..., oba volitelný redirect=keep; track-delete: repo_path=...
@@ -299,7 +299,7 @@ _gh-governance-move-body-parse() {
 
 _gh-governance-rename-body-parse() {
   # Naparsuje a zvaliduje tělo rename-repo issue (přejmenování repa uvnitř
-  # projektu, docs/navrh/gh-rename.md): řádky project_key=, repo_name= a
+  # projektu, docs/implementovano/navrh/gh-rename.md): řádky project_key=, repo_name= a
   # new_repo_name=, každý právě jednou, plus volitelný redirect=keep (jiná
   # hodnota = odmítnutí). Naplní nameref klíči project_key, gh_name,
   # repo_name, new_gh_name, new_repo_name, redirect (keep|cancel); při
