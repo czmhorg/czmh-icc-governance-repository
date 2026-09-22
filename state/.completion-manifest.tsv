@@ -5,7 +5,7 @@ pata-app	govtest1	false
 rn-a2	govtest1	false
 rn-b2	govtest1	false
 rn-c2	govtest1	false
-rn-d	govtest1	true
+rn-d2	govtest1	true
 rn-e2	govtest1	false
 adopt	govtest2	false
 druha-app	govtest2	false
