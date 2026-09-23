@@ -164,8 +164,20 @@ _gh-governance-bot-policy-preflight() {
     return 1
   }
   _gh-jenkins-policy-resolve "$_key" "" _login _configured _decision || return 1
-  if [[ -n "$_login" && "${_login,,}" == "${GH_GOVERNANCE_BOT_USER,,}" ]]; then
-    echo "Chyba: Governance bot '$GH_GOVERNANCE_BOT_USER' nesmi byt totozny s Jenkins uctem projektu '$_key'." >&2
+  _gh-jenkins-bot-collision-check "$_key" "$_login"
+}
+
+_gh-jenkins-bot-collision-check() {
+  # Chyba, je-li Jenkins login projektu totožný s governance botem (defs.md:
+  # ghGovernanceBotUser). Bez ohledu na atribut |jenkins: u repa bez něj by
+  # policy bota odebírala jako nechtěného Jenkins collaboratora (assign ho
+  # přidá, remove odebere – každý běh). Hlídá se v preflightu migrace
+  # i v check/assign/remove policy (reconcile preflight nevolá).
+  # Použití: _gh-jenkins-bot-collision-check <projectKey> <jenkins_login>
+  local _key="$1" _login="$2"
+  if [[ -n "$_login" && -n "${GH_GOVERNANCE_BOT_USER:-}" && \
+        "${_login,,}" == "${GH_GOVERNANCE_BOT_USER,,}" ]]; then
+    echo "Chyba: Governance bot '$GH_GOVERNANCE_BOT_USER' nesmi byt totozny s Jenkins uctem projektu '$_key' (klic jenkins_user domeny v conf.d/domains/) – policy by bota odebirala jako Jenkins collaboratora." >&2
     return 1
   fi
 }
@@ -868,6 +880,8 @@ _gh-repository-policy-check() {
   _result_ref=ERROR; _detail_ref="policy configuration check failed"
   _require_vars GH_GOVERNANCE_BOT_USER || return 0
   _gh-jenkins-policy-resolve "$_key" "$_gh_name" _login _configured _decision || return 0
+  _detail_ref="Jenkins login equals governance bot"
+  _gh-jenkins-bot-collision-check "$_key" "$_login" || return 0
   _detail_ref="teams check failed"
   _teams=$(_gh-repository-policy-teams-check "$_repo_path" "$_key" "$_gh_name") || return 0
   _detail_ref="rulesets check failed"
@@ -946,6 +960,7 @@ _gh-repository-policy-assign() {
   local -A _payloads=()
   _gh-validate-admin-team "$_key" GITHUB_REPO_TEAMS || return 1
   _gh-jenkins-policy-resolve "$_key" "$_gh_name" _login _configured _decision || return 1
+  _gh-jenkins-bot-collision-check "$_key" "$_login" || return 1
   _gh-ruleset-payloads-build "$_key" "$_gh_name" "$_login" _payloads || return 1
   _gh-repository-policy-reconcile-teams "$_repo_path" "$_key" "$_gh_name" || return 1
   _gh-governance-bot-collaborator-add "$_repo_path" "$_key" || return 1
@@ -968,6 +983,7 @@ _gh-repository-policy-remove() {
   local _login _configured _decision
   _gh-validate-admin-team "$_key" GITHUB_REPO_TEAMS || return 1
   _gh-jenkins-policy-resolve "$_key" "$_gh_name" _login _configured _decision || return 1
+  _gh-jenkins-bot-collision-check "$_key" "$_login" || return 1
   if [[ "$_configured" == true && "$_decision" != allowed ]]; then
     _gh-jenkins-collaborator-remove "$_repo_path" "$_key" "$_login" || return 1
   fi
