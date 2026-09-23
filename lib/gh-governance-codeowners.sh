@@ -5,8 +5,9 @@
 # CODEOWNERS_README.md do spravovaných rep podle klíče pr_reviewers_team
 # (defs/defs.md; docs/plans/plan-codeowners-distribuce.md). Rozhodovací
 # logika je v čistých funkcích (offline testy), zápisy jdou přes Contents
-# API (jeden commit na soubor, bez klonu; přes rulesety projde bot jako
-# bypass actor). Jediné místo, kde governance zapisuje obsah spravovaných
+# API (jeden commit na soubor, bez klonu; přes rulesety projde bot díky
+# svému bypass týmu — bypass actor Team/always, defs/defs.md: bypass tym).
+# Jediné místo, kde governance zapisuje obsah spravovaných
 # rep — výhradně v souborech/sekcích označených vlastními značkami.
 # Volají ji: denní reconcile (hlavní smyčka), workflow codeowners-sync
 # (_gh-governance-codeowners-sync-run — jeden projekt, spouští governance

@@ -13,7 +13,9 @@
 # lib/gh-governance-issue.sh (track-delete sweep; jen v GitHub Actions),
 # lib/gh-governance-deploy-manifest.sh (kontrola driftu kódu),
 # lib/gh-governance-codeowners.sh (správa CODEOWNERS dle pr_reviewers_team),
-# lib/gh-governance-pr-review.sh (PR bez žádosti o review, projekt bez týmu).
+# lib/gh-governance-pr-review.sh (PR bez žádosti o review, projekt bez týmu),
+# lib/gh-governance-bypass-team.sh (bypass týmy bota a Jenkins loginů před
+# hlavní smyčkou: založení, členství, popis).
 [[ -n "${_GH_GOVERNANCE_RECONCILE_LOADED:-}" ]] && \
   declare -F _gh-governance-classify >/dev/null && return 0
 _GH_GOVERNANCE_RECONCILE_LOADED=1
@@ -514,6 +516,14 @@ _gh-governance-reconcile-run() {
     echo "Chyba: Výpis rep organizace '$GITHUB_ORG' selhal." >&2
     return 1
   }
+
+  # Bypass týmy (bot + Jenkins loginy domén projektů) před hlavní smyčkou:
+  # týmy existují dřív, než smyčka staví payloady rulesetů (cache ID);
+  # lazy založení v builderu zůstává pro ostatní workflows pod botem.
+  # Položky reportu dle defs.md; chybějící konfigurace = error na gov repu.
+  _gh-governance-reconcile-bypass-teams || \
+    _gh-governance-report-add error "kontrola bypass tymu selhala" \
+      "${GITHUB_ORG}/${GH_GOVERNANCE_REPO}" "chybí konfigurace (GH_GOVERNANCE_BOT_USER, GH_BYPASS_TEAM_PREFIX)"
 
   while IFS=$'\t' read -r _name _archived _branch _topics _extra; do
     [[ -n "$_name" ]] || continue

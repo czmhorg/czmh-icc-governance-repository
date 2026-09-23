@@ -78,11 +78,11 @@ _gh-jenkins-collaborator-add() {
     --method PUT --field permission=push >/dev/null
 }
 
-_gh-jenkins-delete() {
-  # 404-tolerantní DELETE na GH API (mizející zdroj není chyba).
-  # Použití: _gh-jenkins-delete <endpoint> <projectKey>
-  local _endpoint="$1" _key="$2" _error_file _error
-  _gh-validate-admin-team "$_key" GITHUB_REPO_TEAMS || return 1
+_gh-api-delete-404ok() {
+  # 404-tolerantní DELETE na GH API (mizející zdroj není chyba); bez validace
+  # admin týmu – volající ji dělá sám, kde jde o repo projektu.
+  # Použití: _gh-api-delete-404ok <endpoint>
+  local _endpoint="$1" _error_file _error
   _error_file=$(mktemp) || return 1
   if GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "$_endpoint" --method DELETE \
       >/dev/null 2>"$_error_file"; then
@@ -94,6 +94,13 @@ _gh-jenkins-delete() {
   grep -qF '(HTTP 404)' <<< "$_error" && return 0
   [[ -n "$_error" ]] && printf '%s\n' "$_error" >&2
   return 1
+}
+
+_gh-jenkins-delete() {
+  # 404-tolerantní DELETE na zdroji repa projektu (po validaci admin týmu).
+  # Použití: _gh-jenkins-delete <endpoint> <projectKey>
+  _gh-validate-admin-team "$2" GITHUB_REPO_TEAMS || return 1
+  _gh-api-delete-404ok "$1"
 }
 
 _gh-jenkins-collaborator-remove() {
@@ -119,7 +126,7 @@ _gh-jenkins-policy-preflight() {
     echo "Chyba: Jenkins ucet '$_login' neni clenem organizace '$GITHUB_ORG'." >&2
     return 1
   }
-  _authenticated=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api user --jq '.login') || return 1
+  _gh-auth-login _authenticated || return 1
   if [[ "${_authenticated,,}" == "${_login,,}" ]]; then
     echo "Chyba: Jenkins ucet nesmi byt totozny s autentizovanym automatizacnim uctem." >&2
     return 1
@@ -211,51 +218,235 @@ _gh-profile-requires-pr() {
   [[ "${_GH_CONF[profiles/$1/require_pull_request]:-true}" != false ]]
 }
 
-declare -gA _GH_USER_ID_CACHE=()
+# ── Bypass týmy (defs/defs.md: bypass tym; docs/navrh/bypass-pres-tym.md) ────
+# Bypass rulesetů dostává účet (bot, Jenkins login domény) výhradně přes tým
+# <GH_BYPASS_TEAM_PREFIX><login> jako bypass actor Team/always — bypass actora
+# typu User GHES 3.21 neuplatňuje. Chybějící tým zakládá jen bot (PAT s org
+# permission Members: write / classic scope admin:org) nebo gov-init pod
+# správcem; jiný účet dostane
+# hlášku. Cache v paměti běhu: jeden lookup a jeden pokus o založení na tým.
+declare -gA _GH_BYPASS_TEAM_ID_CACHE=()    # slug → id týmu
+declare -gA _GH_BYPASS_TEAM_DESC_CACHE=()  # slug → popis (z téhož GET, kontrola v reconcile)
+declare -gA _GH_BYPASS_TEAM_FAILED=()      # slug → hláška selhání (bez opakování API)
+declare -gA _GH_BYPASS_TEAM_CREATED=()     # slug → login (info položka reportu)
+_GH_AUTH_LOGIN_CACHE=""
 
-_gh-user-id() {
-  # Naplní nameref číselným ID GitHub účtu (bypass actor rulesetu vyžaduje
-  # actor_id, ne login) – Jenkins účet projektu i governance bot; výsledek
-  # cachuje v paměti shellu. Nameref místo stdout, aby zápis do cache
-  # nezanikal v subshellu command substitution.
-  # Použití: _gh-user-id <login> <výstupní proměnná>
-  local _login="$1" _id
-  declare -n _gh_user_id_ref="$2"
-  if [[ -v _GH_USER_ID_CACHE["$_login"] ]]; then
-    _gh_user_id_ref="${_GH_USER_ID_CACHE[$_login]}"
+_gh-bypass-team-slug() {
+  # Slug bypass týmu účtu: <GH_BYPASS_TEAM_PREFIX><login> (login malými písmeny).
+  # Použití: _gh-bypass-team-slug <login>
+  printf '%s%s' "$GH_BYPASS_TEAM_PREFIX" "${1,,}"
+}
+
+_gh-bypass-team-description() {
+  # Doporučený popis (description) bypass týmu — vysvětlení pro org ownera,
+  # proč tým existuje; uvádí se i v hláškách pro ruční založení.
+  # Použití: _gh-bypass-team-description <login>
+  printf 'Governance: bypass rulesetů %s-* a gov-default-branch pro účet %s. Jediný člen = %s (+ governance bot jako maintainer); tým nemá přístup k repům, jen vypíná pravidla rulesetů. Nemazat, členy nepřidávat. Viz README gov repa.' \
+    "$GH_RULESET_PREFIX" "$1" "$1"
+}
+
+_gh-auth-login() {
+  # Naplní nameref loginem přihlášeného účtu gh (cache v paměti běhu).
+  # Použití: _gh-auth-login <výstupní proměnná>
+  declare -n _gh_auth_login_ref="$1"
+  if [[ -z "$_GH_AUTH_LOGIN_CACHE" ]]; then
+    _GH_AUTH_LOGIN_CACHE=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api user --jq '.login') || {
+      echo "Chyba: Nepodarilo se zjistit prihlaseny ucet gh (GH_HOST=$GITHUB_ORG_HOSTNAME)." >&2
+      return 1
+    }
+  fi
+  _gh_auth_login_ref="$_GH_AUTH_LOGIN_CACHE"
+}
+
+_gh-bypass-team-fail() {
+  # Zapíše hlášku selhání týmu do cache (jeden pokus za běh) a vypíše ji.
+  # Použití: _gh-bypass-team-fail <slug> <hláška>
+  _GH_BYPASS_TEAM_FAILED["$1"]="$2"
+  printf '%s\n' "$2" >&2
+}
+
+_gh-bypass-team-id() {
+  # Naplní nameref číselným ID bypass týmu účtu (GET orgs/<org>/teams/<slug>);
+  # popis týmu z téže odpovědi jde do _GH_BYPASS_TEAM_DESC_CACHE. rc 0 = tým
+  # existuje, rc 3 = neexistuje (HTTP 404, tiše), rc 1 = jiná chyba nebo
+  # dřívější selhání téhož slugu v tomto běhu (uložená hláška, bez API).
+  # Použití: _gh-bypass-team-id <login> <výstupní proměnná>
+  local _login="$1" _slug _out _team_id _error_file _error
+  declare -n _gh_bypass_team_id_ref="$2"
+  _require_vars GH_BYPASS_TEAM_PREFIX || return 1
+  _slug=$(_gh-bypass-team-slug "$_login")
+  if [[ -v _GH_BYPASS_TEAM_ID_CACHE["$_slug"] ]]; then
+    _gh_bypass_team_id_ref="${_GH_BYPASS_TEAM_ID_CACHE[$_slug]}"
     return 0
   fi
-  _id=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "users/$_login" --jq '.id') || {
-    echo "Chyba: Nepodarilo se zjistit ID GitHub uctu '$_login'." >&2
-    return 1
-  }
-  if [[ ! "$_id" =~ ^[0-9]+$ ]]; then
-    echo "Chyba: Neocekavane ID GitHub uctu '$_login': '$_id'." >&2
+  if [[ -v _GH_BYPASS_TEAM_FAILED["$_slug"] ]]; then
+    printf '%s\n' "${_GH_BYPASS_TEAM_FAILED[$_slug]}" >&2
     return 1
   fi
-  _GH_USER_ID_CACHE["$_login"]="$_id"
-  _gh_user_id_ref="$_id"
+  _error_file=$(mktemp) || return 1
+  if _out=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api "orgs/$GITHUB_ORG/teams/$_slug" \
+      --jq '[.id, (.description // "")] | @tsv' 2>"$_error_file"); then
+    rm -f "$_error_file"
+    _team_id="${_out%%$'\t'*}"
+    if [[ ! "$_team_id" =~ ^[0-9]+$ ]]; then
+      echo "Chyba: Neocekavane ID bypass tymu '$_slug' (ucet '$_login'): '$_team_id'." >&2
+      return 1
+    fi
+    _GH_BYPASS_TEAM_ID_CACHE["$_slug"]="$_team_id"
+    _GH_BYPASS_TEAM_DESC_CACHE["$_slug"]="${_out#*$'\t'}"
+    _gh_bypass_team_id_ref="$_team_id"
+    return 0
+  fi
+  _error=$(< "$_error_file")
+  rm -f "$_error_file"
+  grep -qF '(HTTP 404)' <<< "$_error" && return 3
+  [[ -n "$_error" ]] && printf '%s\n' "$_error" >&2
+  echo "Chyba: Nepodarilo se zjistit ID bypass tymu '$_slug' (ucet '$_login')." >&2
+  return 1
+}
+
+_gh-bypass-team-create() {
+  # Založí bypass tým účtu (POST orgs/<org>/teams, privacy closed, s popisem);
+  # zakladatel je automaticky maintainer. Stdout: id týmu. Přímé gh api bez
+  # retry: odmítnutí (HTTP 403 org zakázala členům zakládat týmy / PAT bez
+  # Members: write ani classic scope admin:org, 404, 422) je definitivní → rc 2 (stderr gh propuštěn),
+  # jiná chyba rc 1.
+  # Použití: _gh-bypass-team-create <login>
+  local _login="$1" _slug _payload _id _error_file _error
+  _slug=$(_gh-bypass-team-slug "$_login")
+  _payload=$(printf '{"name":"%s","description":"%s","privacy":"closed"}' \
+    "$_slug" "$(_gh-bypass-team-description "$_login")")
+  _error_file=$(mktemp) || return 1
+  if _id=$(printf '%s' "$_payload" | GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
+      "orgs/$GITHUB_ORG/teams" --method POST --input - --jq '.id' 2>"$_error_file"); then
+    rm -f "$_error_file"
+    printf '%s\n' "$_id"
+    return 0
+  fi
+  _error=$(< "$_error_file")
+  rm -f "$_error_file"
+  [[ -n "$_error" ]] && printf '%s\n' "$_error" >&2
+  grep -qE '\(HTTP (403|404|422)\)' <<< "$_error" && return 2
+  return 1
+}
+
+_gh-bypass-team-member-set() {
+  # Přidá účet do bypass týmu (PUT memberships, role member|maintainer).
+  # Stav active = rc 0; pending (login mimo organizaci → jen pozvánka, bypass
+  # neplatí) = rc 1 s hláškou; chyba API rc 1.
+  # Použití: _gh-bypass-team-member-set <slug> <login> <member|maintainer>
+  local _slug="$1" _login="$2" _role="$3" _state
+  case "$_role" in
+    member|maintainer) ;;
+    *) echo "Chyba: Neznama role clena bypass tymu: '$_role' (member|maintainer)." >&2; return 1 ;;
+  esac
+  _state=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
+    "orgs/$GITHUB_ORG/teams/$_slug/memberships/$_login" \
+    --method PUT --field role="$_role" --jq '.state') || return 1
+  [[ "$_state" == active ]] && return 0
+  echo "Chyba: Ucet '$_login' neni clenem organizace '$GITHUB_ORG' – clenstvi v bypass tymu '$_slug' je jen pozvanka ($_state), bypass neplati." >&2
+  return 1
+}
+
+_gh-bypass-team-member-remove() {
+  # Odebere účet z bypass týmu (404-tolerantní DELETE; lidský zakladatel
+  # v gov-init po založení týmu bota).
+  # Použití: _gh-bypass-team-member-remove <slug> <login>
+  _gh-api-delete-404ok "orgs/$GITHUB_ORG/teams/$1/memberships/$2"
+}
+
+_gh-bypass-team-ensure() {
+  # Naplní nameref ID bypass týmu účtu; chybí-li tým, založí ho pod přihlášeným
+  # účtem: bot jako maintainer (není-li zakladatel), <login> jako member (není-li
+  # bot), lidský zakladatel (≠ bot, ≠ login) se odebere. Selhání → hláška
+  # s instrukcí pro ruční založení org ownerem, uložená pro tento běh.
+  # Použití: _gh-bypass-team-ensure <login> <výstupní proměnná>
+  local _login="$1" _slug _id _me _bot _rc=0 _error_file _error _http _manual
+  declare -n _gh_bypass_team_ensure_ref="$2"
+  _require_vars GH_BYPASS_TEAM_PREFIX GH_GOVERNANCE_BOT_USER || return 1
+  _gh-bypass-team-id "$_login" _id || _rc=$?
+  if [[ $_rc -eq 0 ]]; then
+    _gh_bypass_team_ensure_ref="$_id"
+    return 0
+  fi
+  [[ $_rc -eq 3 ]] || return 1
+  _gh-auth-login _me || return 1
+  _bot="$GH_GOVERNANCE_BOT_USER"
+  _slug=$(_gh-bypass-team-slug "$_login")
+  _manual="nazev '$_slug', clenove '$_login' a bot '$_bot' (maintainer), popis: \"$(_gh-bypass-team-description "$_login")\""
+  _error_file=$(mktemp) || return 1
+  if ! _id=$(_gh-bypass-team-create "$_login" 2>"$_error_file"); then
+    _error=$(< "$_error_file")
+    rm -f "$_error_file"
+    [[ -n "$_error" ]] && printf '%s\n' "$_error" >&2
+    _http=$(grep -oE 'HTTP [0-9]+' <<< "$_error" | head -n 1)
+    _gh-bypass-team-fail "$_slug" "Chyba: Bypass tym '$_slug' pro ucet '$_login' nelze zalozit (${_http:-chyba API}) – zaloz ho rucne jako org owner: $_manual; zkontroluj org nastaveni 'Allow members to create teams' a PAT bota s pravem spravovat tymy (fine-grained: org permission Members: write, classic: scope admin:org)."
+    return 1
+  fi
+  rm -f "$_error_file"
+  if [[ "${_me,,}" != "${_bot,,}" ]] && ! _gh-bypass-team-member-set "$_slug" "$_bot" maintainer; then
+    _gh-bypass-team-fail "$_slug" "Chyba: Bypass tym '$_slug' pro ucet '$_login' zalozen, ale bota '$_bot' (maintainer) nelze pridat – dopln cleny rucne jako org owner: $_manual."
+    return 1
+  fi
+  if [[ "${_login,,}" != "${_bot,,}" ]] && ! _gh-bypass-team-member-set "$_slug" "$_login" member; then
+    _gh-bypass-team-fail "$_slug" "Chyba: Bypass tym '$_slug' pro ucet '$_login' zalozen, ale clena '$_login' nelze pridat – dopln cleny rucne jako org owner: $_manual."
+    return 1
+  fi
+  if [[ "${_me,,}" != "${_bot,,}" && "${_me,,}" != "${_login,,}" ]] && \
+      ! _gh-bypass-team-member-remove "$_slug" "$_me"; then
+    _gh-bypass-team-fail "$_slug" "Chyba: Bypass tym '$_slug' pro ucet '$_login' zalozen, ale zakladatele '$_me' nelze odebrat – odeber ho rucne (org owner nebo bot jako maintainer); ocekavani: $_manual."
+    return 1
+  fi
+  _GH_BYPASS_TEAM_ID_CACHE["$_slug"]="$_id"
+  _GH_BYPASS_TEAM_DESC_CACHE["$_slug"]=$(_gh-bypass-team-description "$_login")
+  _GH_BYPASS_TEAM_CREATED["$_slug"]="$_login"
+  _gh_bypass_team_ensure_ref="$_id"
+}
+
+_gh-bypass-team-resolve() {
+  # Rozhraní pro builder payloadu rulesetu: ID bypass týmu účtu. Chybí-li tým,
+  # založí ho jen přihlášený bot (ensure); pod jiným účtem (migrátor, lokální
+  # běh) rc 1 s hláškou, že tým založí bot při příštím daily-reconcile.
+  # Použití: _gh-bypass-team-resolve <login> <výstupní proměnná>
+  local _login="$1" _id _me _slug _rc=0
+  declare -n _gh_bypass_team_resolve_ref="$2"
+  _gh-bypass-team-id "$_login" _id || _rc=$?
+  if [[ $_rc -eq 0 ]]; then
+    _gh_bypass_team_resolve_ref="$_id"
+    return 0
+  fi
+  [[ $_rc -eq 3 ]] || return 1
+  _gh-auth-login _me || return 1
+  if [[ -n "${GH_GOVERNANCE_BOT_USER:-}" && "${_me,,}" == "${GH_GOVERNANCE_BOT_USER,,}" ]]; then
+    _gh-bypass-team-ensure "$_login" _gh_bypass_team_resolve_ref
+    return
+  fi
+  _slug=$(_gh-bypass-team-slug "$_login")
+  _gh-bypass-team-fail "$_slug" "Chyba: Bypass tym '$_slug' pro ucet '$_login' neexistuje – zalozi ho governance bot pri pristim behu daily-reconcile (lze spustit rucne), nebo org owner rucne: nazev '$_slug', clenove '$_login' a bot '${GH_GOVERNANCE_BOT_USER:-}' (maintainer), popis: \"$(_gh-bypass-team-description "$_login")\"."
+  return 1
 }
 
 _gh-ruleset-payload() {
   # Sestaví JSON payload rulesetu ${GH_RULESET_PREFIX}-<profil> z polí profilu – offline,
-  # bez sítě (actor_id dodá volající). Překlad branch protection → ruleset dle
-  # docs/github/branch-protection-vs-rulesets-mapovani.md a rozhodnutí návrhu:
+  # bez sítě (ID bypass týmů dodá volající). Překlad branch protection → ruleset
+  # dle docs/github/branch-protection-vs-rulesets-mapovani.md a rozhodnutí návrhu:
   #   - allow_force_pushes/allow_deletions=false → pravidlo non_fast_forward/deletion,
   #   - required_status_checks bez checků → pravidlo se vynechá (API odmítá []),
   #   - restrictions != null → pravidlo update, jen má-li ruleset bypass actora
   #     Jenkins/admin (bot se do podmínky nepočítá — jinak by na profilech
   #     s restrictions směl větve aktualizovat jen bot),
   #   - enforce_admins=false → bypass actor RepositoryRole 5 (admin),
-  #   - <bot_actor_id> neprázdné → bypass actor User always pro governance
-  #     bota (zápis obsahu spravovaných rep přes Contents API — CODEOWNERS;
-  #     bot je admin každého repa, bypass jeho práva nerozšiřuje),
+  #   - Jenkins i bot jsou bypass actor Team always přes svůj bypass tým
+  #     (defs/defs.md: bypass tym; actor typu User GHES 3.21 neuplatňuje):
+  #     <jenkins_team_id> u položky |jenkins s PR, <bot_team_id> neprázdné →
+  #     tým governance bota (zápis obsahu spravovaných rep přes Contents API —
+  #     CODEOWNERS; bot je admin každého repa, bypass jeho práva nerozšiřuje),
   #   - require_pull_request=false (profil bez PR) → bez pravidla pull_request
   #     a bez Jenkins bypass actora (parametr <jenkins> se ignoruje: Jenkins
   #     pushuje přímo jako collaborator, bypass nemá co obcházet; pole review
   #     profilu jen validuje parser). Bez Jenkinse vznikne pravidlo update
   #     u restrictions != null jen s admin bypassem (enforce_admins=false).
-  # Použití: _gh-ruleset-payload <projectKey> <profil> <jenkins:0|1> [jenkins_actor_id] [bot_actor_id]
+  # Použití: _gh-ruleset-payload <projectKey> <profil> <jenkins:0|1> [jenkins_team_id] [bot_team_id]
   local _key="$1" _profile="$2" _jenkins="$3" _actor_id="${4:-}" _bot_id="${5:-}"
   local _field _value _bypass_actors="" _update_bypass="" _rules="" _sep _requires_pr=1
   for _field in branches $_GH_CONF_PROFILE_FIELDS; do
@@ -268,10 +459,10 @@ _gh-ruleset-payload() {
 
   if [[ "$_jenkins" == 1 && $_requires_pr -eq 1 ]]; then
     if [[ ! "$_actor_id" =~ ^[0-9]+$ ]]; then
-      echo "Chyba: Položka '$_profile|jenkins' vyžaduje číselné actor_id Jenkins účtu (je '${_actor_id:-<prázdné>}')." >&2
+      echo "Chyba: Položka '$_profile|jenkins' vyžaduje číselné actor_id bypass týmu Jenkins účtu (je '${_actor_id:-<prázdné>}')." >&2
       return 1
     fi
-    _bypass_actors='{ "actor_id": '"$_actor_id"', "actor_type": "User", "bypass_mode": "always" }'
+    _bypass_actors='{ "actor_id": '"$_actor_id"', "actor_type": "Team", "bypass_mode": "always" }'
   fi
   if [[ "${_GH_CONF[profiles/$_profile/enforce_admins]}" == false ]]; then
     _bypass_actors+="${_bypass_actors:+, }"'{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }'
@@ -279,7 +470,7 @@ _gh-ruleset-payload() {
   # Snapshot pro podmínku pravidla update — jen bypass Jenkins/admin výše.
   _update_bypass="$_bypass_actors"
   if [[ -n "$_bot_id" ]]; then
-    _bypass_actors+="${_bypass_actors:+, }"'{ "actor_id": '"$_bot_id"', "actor_type": "User", "bypass_mode": "always" }'
+    _bypass_actors+="${_bypass_actors:+, }"'{ "actor_id": '"$_bot_id"', "actor_type": "Team", "bypass_mode": "always" }'
   fi
 
   local -a _rules_arr=()
@@ -326,10 +517,12 @@ _gh-ruleset-payload() {
 _gh-ruleset-payloads-build() {
   # Sestaví payloady všech položek efektivního klíče rulesets repa do nameref
   # asociativního pole jméno rulesetu → payload. Slouží i jako fail-fast
-  # validace konfigurace před první mutací (včetně lookupu actor_id).
-  # Položka none = žádný ruleset (prázdné pole; apply pak smaže všechny
-  # ${GH_RULESET_PREFIX}-*). ID účtů se zjišťují, jen když je payload použije:
-  # u none|jenkins a profilu bez PR zůstává Jenkins jen collaborator.
+  # validace konfigurace před první mutací (včetně lookupu ID bypass týmů;
+  # chybějící tým založí jen běh pod botem – _gh-bypass-team-resolve, jinde
+  # rc 1 s hláškou). Položka none = žádný ruleset (prázdné pole; apply pak
+  # smaže všechny ${GH_RULESET_PREFIX}-*). ID týmů se zjišťují, jen když je
+  # payload použije: u none|jenkins a profilu bez PR zůstává Jenkins jen
+  # collaborator.
   # Použití: local -A _p=(); _gh-ruleset-payloads-build <projectKey> <ghName> <jenkins_login> _p
   local _key="$1" _gh_name="$2" _jenkins_login="$3" _items _profile _jenkins _actor_id _payload
   local _bot_id=""
@@ -337,10 +530,11 @@ _gh-ruleset-payloads-build() {
   _items=$(_gh-conf-rulesets-items "$_key" "$_gh_name") || return 1
   while IFS=$'\t' read -r _profile _jenkins; do
     [[ "$_profile" == "$_GH_CONF_NONE" ]] && continue
-    # Governance bot je bypass actor always každého rulesetu (zápis CODEOWNERS
-    # přes Contents API); bez nastaveného bota (offline testy) se vynechá.
+    # Bypass tým governance bota je bypass actor always každého rulesetu
+    # (zápis CODEOWNERS přes Contents API); bez nastaveného bota (offline
+    # testy) se vynechá.
     if [[ -z "$_bot_id" && -n "${GH_GOVERNANCE_BOT_USER:-}" ]]; then
-      _gh-user-id "$GH_GOVERNANCE_BOT_USER" _bot_id || return 1
+      _gh-bypass-team-resolve "$GH_GOVERNANCE_BOT_USER" _bot_id || return 1
     fi
     _actor_id=""
     if [[ "$_jenkins" == 1 ]] && _gh-profile-requires-pr "$_profile"; then
@@ -348,7 +542,7 @@ _gh-ruleset-payloads-build() {
         echo "Chyba: Položka '$_profile|jenkins' v klíči rulesets projektu '$_key', ale Jenkins login není k dispozici. Zkontroluj klíč jenkins_user domény v conf.d/domains/." >&2
         return 1
       fi
-      _gh-user-id "$_jenkins_login" _actor_id || return 1
+      _gh-bypass-team-resolve "$_jenkins_login" _actor_id || return 1
     fi
     _payload=$(_gh-ruleset-payload "$_key" "$_profile" "$_jenkins" "$_actor_id" "$_bot_id") || return 1
     _payloads_ref["${GH_RULESET_PREFIX}-$_profile"]="$_payload"

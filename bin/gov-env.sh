@@ -54,6 +54,7 @@ source "$_GOV_ROOT/lib/gh-governance-deploy-manifest.sh"
 source "$_GOV_ROOT/lib/gh-governance-labels.sh"
 source "$_GOV_ROOT/lib/gh-governance-codeowners.sh"
 source "$_GOV_ROOT/lib/gh-governance-pr-review.sh"
+source "$_GOV_ROOT/lib/gh-governance-bypass-team.sh"
 source "$_GOV_ROOT/lib/gh-governance-reconcile.sh"
 # move závisí na reconcile (GH_GOVERNANCE_CAPACITY_MAX) – sourcovat až po něm.
 source "$_GOV_ROOT/lib/gh-governance-move.sh"

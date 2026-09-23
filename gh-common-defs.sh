@@ -75,12 +75,24 @@ _BB_MIGRATION_TOPIC_MARKER_DONE=bb-gh-migrated
 # s machine userem; czmha je běžný uživatel); produkce: czmh-mhi-git-bbpk-governance-bot.
 : "${GH_GOVERNANCE_BOT_USER:=czmha-bot}"
 
+# Prefix slugu bypass týmů (defs/defs.md, docs/navrh/bypass-pres-tym.md):
+# <GH_BYPASS_TEAM_PREFIX><login> (např. mhcz-bypass-team-for-czmha-bot).
+# Bypass rulesetů (mh-policy-* i gov-default-branch) dostává každý účet — bot
+# i Jenkins login domény — výhradně přes svůj tým jako bypass actor Team/always:
+# bypass actor typu User GHES 3.21 neuplatňuje. Chybějící tým zakládá bot sám
+# (PAT s právem spravovat týmy: fine-grained org permission Members: write,
+# classic scope admin:org); tým nemá přístup k žádnému repu.
+# Stejný pro pískoviště i produkci. Na rozdíl od GH_RULESET_PREFIX prefix
+# končí pomlčkou (login se připojuje bez oddělovače).
+: "${GH_BYPASS_TEAM_PREFIX:=mhcz-bypass-team-for-}"
+
 # Bypass adminů gov repa v rulesetu výchozí větve gov-default-branch
 # (gov-init.sh; docs/navrh/ochrana-gov-repa.md): pull_request = admini repa
 # smějí mergnout PR bez cizího schválení, ale ne pushovat přímo; none = bez
 # výjimky. Testovací default pull_request (jediný správce by se jinak zamkl);
 # produkce: none – pak musí mít GH_GOVERNANCE_ADMIN_TEAM aspoň dva členy.
-# Bot (GH_GOVERNANCE_BOT_USER) má bypass always vždy (zápis state/).
+# Bypass tým bota (GH_BYPASS_TEAM_PREFIX + GH_GOVERNANCE_BOT_USER) má bypass
+# always vždy (zápis state/).
 : "${GH_GOVERNANCE_ADMIN_BYPASS:=pull_request}"
 
 # Viditelnost rep zakládaných governancí (workflow new-repository / gh-new).
@@ -110,6 +122,8 @@ _GH_BRANCH_NAME_REGEX='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 # (gh-clone, gh-cd, gh-open, gh-project-clone, gh-sync, gh-status) pracují
 # se strukturou ${GH_WORKSPACE_ROOT}/{projectKey}/{ghName}. Výchozí hodnota
 # platí bez jakékoli lokální konfigurace; přepsání v gh-common-defs.local.sh.
+# Koncové lomítko hodnoty se po načtení lokální konfigurace ořeže (cesty se
+# skládají jako ${GH_WORKSPACE_ROOT}/…, jinak by vznikalo dvojité lomítko).
 # Nezapomeň: používej ${HOME}/..., ne ~/... (tilda se neexpanduje ve všech kontextech).
 : "${GH_WORKSPACE_ROOT:=${HOME}/github/workspace}"
 
@@ -223,6 +237,8 @@ _GH_COMMON_DIR="$(dirname "${BASH_SOURCE[0]}")"
 _GH_COMMON_LOCAL="$_GH_COMMON_DIR/gh-common-defs.local.sh"
 [[ -f "$_GH_COMMON_LOCAL" ]] && source "$_GH_COMMON_LOCAL"
 unset _GH_COMMON_LOCAL
+# Jediné místo normalizace tvaru kořene workspace (env i .local.sh).
+GH_WORKSPACE_ROOT="${GH_WORKSPACE_ROOT%/}"
 
 # Zámek a sync pracovních rep funkcí (docs/implementovano/pracovni-repa-funkci.md).
 if ! source "$_GH_COMMON_DIR/lib/gh-work-repo.sh"; then
