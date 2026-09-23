@@ -33,7 +33,7 @@ declare -gA _GH_CONF_KEYS=()
 declare -ga _GH_CONF_REPO_SETTINGS=()
 
 # Pole profilu = branch protection API (názvy BRANCH_PROTECT_* malými bez prefixu).
-_GH_CONF_PROFILE_FIELDS="required_status_checks enforce_admins dismiss_stale_reviews require_code_owner_reviews required_approving_review_count restrictions allow_force_pushes allow_deletions required_linear_history"
+_GH_CONF_PROFILE_FIELDS="required_status_checks enforce_admins dismiss_stale_reviews require_code_owner_reviews required_approving_review_count allow_force_pushes allow_deletions required_linear_history"
 _GH_CONF_PROFILE_BOOL_FIELDS="enforce_admins dismiss_stale_reviews require_code_owner_reviews allow_force_pushes allow_deletions required_linear_history"
 # Nepovinná pole profilu (bool): require_pull_request=false = ruleset bez
 # pravidla pull_request (defs/defs.md, policy profile). Záměrně mimo

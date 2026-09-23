@@ -444,9 +444,9 @@ _gh-ruleset-payload() {
   # dle docs/github/branch-protection-vs-rulesets-mapovani.md a rozhodnutí návrhu:
   #   - allow_force_pushes/allow_deletions=false → pravidlo non_fast_forward/deletion,
   #   - required_status_checks bez checků → pravidlo se vynechá (API odmítá []),
-  #   - restrictions != null → pravidlo update, jen má-li ruleset bypass actora
-  #     Jenkins/admin (bot se do podmínky nepočítá — jinak by na profilech
-  #     s restrictions směl větve aktualizovat jen bot),
+  #   - pravidlo update (Restrict updates) se negeneruje nikdy: blokovalo by
+  #     i merge schváleného PR všem mimo bypass týmy (pole profilu restrictions
+  #     zrušeno 2026-09-23, docs/plans/plan-zruseni-restrictions.md),
   #   - enforce_admins=false → bypass actor RepositoryRole 5 (admin),
   #   - Jenkins i bot jsou bypass actor Team always přes svůj bypass tým
   #     (defs/defs.md: bypass tym; actor typu User GHES 3.21 neuplatňuje):
@@ -456,11 +456,10 @@ _gh-ruleset-payload() {
   #   - require_pull_request=false (profil bez PR) → bez pravidla pull_request
   #     a bez Jenkins bypass actora (parametr <jenkins> se ignoruje: Jenkins
   #     pushuje přímo jako collaborator, bypass nemá co obcházet; pole review
-  #     profilu jen validuje parser). Bez Jenkinse vznikne pravidlo update
-  #     u restrictions != null jen s admin bypassem (enforce_admins=false).
+  #     profilu jen validuje parser).
   # Použití: _gh-ruleset-payload <projectKey> <profil> <jenkins:0|1> [jenkins_team_id] [bot_team_id]
   local _key="$1" _profile="$2" _jenkins="$3" _actor_id="${4:-}" _bot_id="${5:-}"
-  local _field _value _bypass_actors="" _update_bypass="" _rules="" _sep _requires_pr=1
+  local _field _value _bypass_actors="" _rules="" _sep _requires_pr=1
   for _field in branches $_GH_CONF_PROFILE_FIELDS; do
     if [[ -z "${_GH_CONF[profiles/$_profile/$_field]:-}" ]]; then
       echo "Chyba: Profil '$_profile' (projekt '$_key') nemá klíč '$_field' – payload rulesetu nelze sestavit. Zkontroluj conf.d/profiles/$_profile.conf." >&2
@@ -479,8 +478,6 @@ _gh-ruleset-payload() {
   if [[ "${_GH_CONF[profiles/$_profile/enforce_admins]}" == false ]]; then
     _bypass_actors+="${_bypass_actors:+, }"'{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }'
   fi
-  # Snapshot pro podmínku pravidla update — jen bypass Jenkins/admin výše.
-  _update_bypass="$_bypass_actors"
   if [[ -n "$_bot_id" ]]; then
     _bypass_actors+="${_bypass_actors:+, }"'{ "actor_id": '"$_bot_id"', "actor_type": "Team", "bypass_mode": "always" }'
   fi
@@ -496,11 +493,6 @@ _gh-ruleset-payload() {
   if [[ "$_value" != null && "$_value" != *'"contexts":[]'* ]]; then
     echo "Chyba: Profil '$_profile' má neprázdný seznam checků v required_status_checks – překlad na ruleset zatím není podporován (viz docs/implementovano/prechod-rulesets.md)." >&2
     return 1
-  fi
-  _value="${_GH_CONF[profiles/$_profile/restrictions]}"
-  _value="${_value//[[:space:]]/}"
-  if [[ "$_value" != null && -n "$_update_bypass" ]]; then
-    _rules_arr+=('{ "type": "update" }')
   fi
   [[ "${_GH_CONF[profiles/$_profile/allow_force_pushes]}" == false ]] && \
     _rules_arr+=('{ "type": "non_fast_forward" }')
