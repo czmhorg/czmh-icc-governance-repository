@@ -21,9 +21,9 @@ nastavení, aniž by cokoli musel kdokoli nastavovat ručně:
   v issue `reconcile-report`. Hlídá i pull requesty: u otevřeného PR bez
   žádosti o review požádá tým projektu (`pr_reviewers_team`) a projekt bez
   tohoto týmu hlásí. Soubor `CODEOWNERS` (automatické žádosti o review)
-  zapisuje automatika už při založení, obnovení, přesunu či přejmenování
-  repa a po každé změně konfigurace projektu (workflow `codeowners-sync`);
-  denní kontrola je pojistkou.
+  a webhook do CI/CD (klíč `webhook_url` projektu) zapisuje automatika už
+  při založení, obnovení, přesunu či přejmenování repa a po každé změně
+  konfigurace projektu (workflow `repo-sync`); denní kontrola je pojistkou.
 - **Migrace z Bitbucketu** — repozitáře se z Bitbucket Serveru přenášejí
   nástroji `bb-*` podle jmenné konvence `czmh-icc-<projekt>-<jméno>`
   a rovnou podléhají výše uvedeným pravidlům.

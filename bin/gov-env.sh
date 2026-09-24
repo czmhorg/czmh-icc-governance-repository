@@ -53,11 +53,13 @@ source "$_GOV_ROOT/lib/gh-governance-report.sh"
 source "$_GOV_ROOT/lib/gh-governance-deploy-manifest.sh"
 source "$_GOV_ROOT/lib/gh-governance-labels.sh"
 source "$_GOV_ROOT/lib/gh-governance-codeowners.sh"
+source "$_GOV_ROOT/lib/gh-governance-webhooks.sh"
 source "$_GOV_ROOT/lib/gh-governance-pr-review.sh"
 source "$_GOV_ROOT/lib/gh-governance-bypass-team.sh"
 source "$_GOV_ROOT/lib/gh-governance-reconcile.sh"
 # move závisí na reconcile (GH_GOVERNANCE_CAPACITY_MAX) – sourcovat až po něm.
 source "$_GOV_ROOT/lib/gh-governance-move.sh"
+source "$_GOV_ROOT/lib/gh-governance-repo-sync.sh"
 
 # Lokální běh (mimo Actions, bez GH_CONFD_ROOT — dle _GH_CONFD_SYNC):
 # synchronizuj pracovní klon gov repa a drž jeho zámek po celý běh entry

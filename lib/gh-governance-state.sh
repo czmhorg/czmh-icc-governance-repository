@@ -261,6 +261,40 @@ _gh-governance-jenkins-to-remove() {
   _gh-governance-jenkins-to-remove-between "$1" "$2" "$1" "$3" "$4"
 }
 
+_gh-governance-webhook-url-to-remove-between() {
+  # Naplní nameref URL spravovaného webhooku k odebrání (defs/defs.md, webhook
+  # repa): efektivní webhook_url repa oldKey/oldGhName na SHA old_sha, pokud je
+  # neprázdná a liší se od efektivní webhook_url repa newKey/newGhName na SHA
+  # new_sha (změna URL, none v nastavení repa, odebrání klíče). Jednoklíčové
+  # volání = diff ukazatel→RUN_SHA; dvouklíčové přesun/přejmenování repa
+  # (move-repository, rename-repository). Pojistka: URL z aktuálně načtené
+  # efektivní konfigurace repa newKey/newGhName (_GH_CONF) se nikdy neodebírá.
+  # rc 1 = chyba (git/parsování) – volající nesmí odebírat.
+  # Použití: local _u; _gh-governance-webhook-url-to-remove-between <oldKey> <old_sha> <oldGhName> <newKey> <new_sha> <newGhName> _u
+  local _old_key="$1" _old_sha="$2" _old_gh_name="$3"
+  local _new_key="$4" _new_sha="$5" _new_gh_name="$6"
+  local _old="" _new="" _current=""
+  declare -n _rm_url_ref="$7"
+  _rm_url_ref=""
+  _gh-governance-conf-effective-at-commit "$_old_sha" "$_old_key" "$_old_gh_name" webhook_url _old \
+    || return 1
+  [[ -n "$_old" ]] || return 0
+  _gh-governance-conf-effective-at-commit "$_new_sha" "$_new_key" "$_new_gh_name" webhook_url _new \
+    || return 1
+  [[ "$_old" != "$_new" ]] || return 0
+  _gh-conf-effective "$_new_key" "$_new_gh_name" webhook_url _current
+  [[ "$_old" != "$_current" ]] || return 0
+  _rm_url_ref="$_old"
+  return 0
+}
+
+_gh-governance-webhook-url-to-remove() {
+  # Jednoklíčová zkratka _gh-governance-webhook-url-to-remove-between (diff
+  # ukazatel→RUN_SHA v rámci téhož projektu a repa).
+  # Použití: local _u; _gh-governance-webhook-url-to-remove <projectKey> <ghName> <pointer_sha> <run_sha> _u
+  _gh-governance-webhook-url-to-remove-between "$1" "$3" "$2" "$1" "$4" "$2" "$5"
+}
+
 _gh-governance-conf-teams-at-commit() {
   # Naplní nameref pole slugy efektivních týmů repa (repository_teams projektu
   # + repository_teams_add nastavení repa; prázdný <ghName> = jen projekt) ve

@@ -13,6 +13,7 @@
 # lib/gh-governance-issue.sh (track-delete sweep; jen v GitHub Actions),
 # lib/gh-governance-deploy-manifest.sh (kontrola driftu kódu),
 # lib/gh-governance-codeowners.sh (správa CODEOWNERS dle pr_reviewers_team),
+# lib/gh-governance-webhooks.sh (správa webhooku dle webhook_url),
 # lib/gh-governance-pr-review.sh (PR bez žádosti o review, projekt bez týmu),
 # lib/gh-governance-bypass-team.sh (bypass týmy bota a Jenkins loginů před
 # hlavní smyčkou: založení, členství, popis).
@@ -569,6 +570,15 @@ _gh-governance-reconcile-run() {
               "$_topics" "$_pointer" 2>"$_err_file"; then
             _gh-governance-report-add error "neuspesna reconciliace repa" \
               "${GITHUB_ORG}/${_name}" "správa CODEOWNERS: $(tail -n 1 "$_err_file")"
+          fi
+          rm -f "$_err_file"
+          # Správa webhooku dle webhook_url — stejná nezávislost a tolerance
+          # selhání; stará URL dle diffu ukazatele před tímto během.
+          _err_file=$(mktemp) || return 1
+          if ! _gh-governance-reconcile-webhook "$_name" "$_key" "$_topics" "$_pointer" \
+              2>"$_err_file"; then
+            _gh-governance-report-add error "neuspesna reconciliace repa" \
+              "${GITHUB_ORG}/${_name}" "správa webhooku: $(tail -n 1 "$_err_file")"
           fi
           rm -f "$_err_file"
         fi ;;

@@ -10,8 +10,10 @@
 # Závislosti z gh-common-defs.sh (definovány před sourcováním tohoto modulu):
 # _gh-match (sám je jen builtin [[ =~ ]] s lokálním LC_ALL=C), _GH_GHNAME_REGEX
 # (názvy souborů nastavení repa), _gh-branch-name-valid + _GH_BRANCH_NAME_REGEX
-# (klíč default_branch) a konfigurační proměnné GH_GOVERNANCE_REPO +
-# GH_REPO_PREFIX (rezervovaný projectKey), GH_SECURITY_MANAGERS_TEAM.
+# (klíč default_branch), _GH_WEBHOOK_URL_REGEX + _GH_WEBHOOK_EVENT_REGEX
+# (klíče webhook_url, webhook_events) a konfigurační proměnné
+# GH_GOVERNANCE_REPO + GH_REPO_PREFIX (rezervovaný projectKey),
+# GH_SECURITY_MANAGERS_TEAM, GH_WEBHOOK_EVENTS_DEFAULT.
 [[ -n "${_GH_CONF_LOADED:-}" ]] && \
   declare -F _gh-conf-load >/dev/null && return 0
 _GH_CONF_LOADED=1
@@ -40,17 +42,19 @@ _GH_CONF_PROFILE_BOOL_FIELDS="enforce_admins dismiss_stale_reviews require_code_
 # _GH_CONF_PROFILE_FIELDS — ten iteruje i _gh-ruleset-payload jako povinná pole.
 _GH_CONF_PROFILE_OPT_FIELDS="require_pull_request"
 _GH_CONF_PROJECT_FIELDS="display_name domain rulesets repository_teams repository_creators repository_archivers"
-# Klíče, které smí obsahovat nastavení repa (rulesets, pr_reviewers_team
-# a default_branch přepisují hodnotu projektu, repository_teams_add přidává týmy).
-_GH_CONF_REPO_FIELDS="rulesets pr_reviewers_team default_branch repository_teams_add"
+# Klíče, které smí obsahovat nastavení repa (rulesets, pr_reviewers_team,
+# default_branch, webhook_url a webhook_events přepisují hodnotu projektu,
+# repository_teams_add přidává týmy).
+_GH_CONF_REPO_FIELDS="rulesets pr_reviewers_team default_branch repository_teams_add webhook_url webhook_events"
 # Rezervovaná hodnota: v rulesets = žádné rulesety mh-policy-* (položka musí
-# být jediná, profiles/none.conf je chyba); v pr_reviewers_team nastavení repa
-# = žádný tým (v projektu chyba).
+# být jediná, profiles/none.conf je chyba); v pr_reviewers_team a webhook_url
+# nastavení repa = žádný tým / žádný spravovaný webhook (v projektu chyba).
 _GH_CONF_NONE=none
 # Nepovinná pole projektu; přítomný klíč musí mít neprázdnou hodnotu.
 # default_branch = výchozí větev nově zakládaného repa (defs/defs.md),
-# formát _gh-branch-name-valid (gh-common-defs.sh).
-_GH_CONF_PROJECT_OPT_FIELDS="description pr_reviewers_team default_branch"
+# formát _gh-branch-name-valid (gh-common-defs.sh); webhook_url +
+# webhook_events = spravovaný webhook rep (defs/defs.md: webhook repa).
+_GH_CONF_PROJECT_OPT_FIELDS="description pr_reviewers_team default_branch webhook_url webhook_events"
 # Práva v repository_teams zajišťující write — CODEOWNERS vlastníka bez write
 # GitHub ignoruje, tým v pr_reviewers_team proto musí mít některé z nich.
 _GH_CONF_PR_REVIEWERS_PERMS="push write maintain admin"
@@ -377,6 +381,9 @@ _gh-conf-validate-project() {
       _gh-conf-err "$2" "$_rel" "neznámý klíč '$_field'"
   done
   _gh-conf-validate-default-branch "${_GH_CONF[projects/$_pk/default_branch]:-}" "$_rel" "$2"
+  _value="${_GH_CONF[projects/$_pk/webhook_url]:-}"
+  _gh-conf-validate-webhook "$_value" "${_GH_CONF[projects/$_pk/webhook_events]:-}" \
+    "$_rel" 0 "$_value" "$2"
   _domain="${_GH_CONF[projects/$_pk/domain]:-}"
   if [[ -n "$_domain" ]]; then
     if ! _gh-match "$_domain" "$_GH_CONF_DOMAIN_REF_REGEX"; then
@@ -419,6 +426,36 @@ _gh-conf-validate-default-branch() {
   return 0
 }
 
+_gh-conf-validate-webhook() {
+  # Zvaliduje klíče webhook_url a webhook_events (defs/defs.md, webhook repa)
+  # projektu i nastavení repa: URL dle _GH_WEBHOOK_URL_REGEX, hodnota none jen
+  # s <allow_none>=1 (nastavení repa); webhook_events jen s neprázdnou
+  # efektivní URL <effective_url> (projekt: vlastní URL; nastavení repa: URL
+  # nastavení, jinak projektu; none = prázdná), položky dle
+  # _GH_WEBHOOK_EVENT_REGEX nebo samotná `*`. Prázdná hodnota = klíč chybí
+  # (prázdný přítomný klíč hlásí volající). Platnost názvu události ověřuje
+  # až GitHub API.
+  # Použití: _gh-conf-validate-webhook <url> <events> <rel> <allow_none 0|1> <effective_url> <errors_ref>
+  local _url="$1" _events="$2" _rel="$3" _allow_none="$4" _effective="$5"
+  if [[ "$_url" == "$_GH_CONF_NONE" ]]; then
+    [[ "$_allow_none" == 1 ]] || \
+      _gh-conf-err "$6" "$_rel" "hodnota '$_GH_CONF_NONE' klíče 'webhook_url' (žádný spravovaný webhook) je povolena jen v nastavení repa; v projektu klíč vynech"
+  elif [[ -n "$_url" ]] && ! _gh-match "$_url" "$_GH_WEBHOOK_URL_REGEX"; then
+    _gh-conf-err "$6" "$_rel" "klíč 'webhook_url' má neplatnou URL '$_url' (povolený formát: $_GH_WEBHOOK_URL_REGEX)"
+  fi
+  [[ -n "$_events" ]] || return 0
+  if [[ -z "$_effective" || "$_effective" == "$_GH_CONF_NONE" ]]; then
+    _gh-conf-err "$6" "$_rel" "klíč 'webhook_events' vyžaduje efektivní webhook_url (projekt ani nastavení repa URL nemá, nebo je '$_GH_CONF_NONE')"
+  elif [[ "$_events" == '*' ]]; then
+    return 0
+  elif [[ "$_events" == *'*'* ]]; then
+    _gh-conf-err "$6" "$_rel" "položka '*' v klíči 'webhook_events' (všechny události) musí být jediná (je '$_events')"
+  else
+    _gh-conf-validate-csv "$_events" "$_GH_WEBHOOK_EVENT_REGEX" "$_rel" webhook_events "$6"
+  fi
+  return 0
+}
+
 _gh-conf-validate-teams-add() {
   # Zvaliduje repository_teams_add nastavení repa (defs/defs.md): formát
   # položek jako repository_teams, zákaz ghOrgSecurityManagersTeam, tým už
@@ -454,7 +491,7 @@ _gh-conf-validate-repo() {
   # chvíli už zvalidovaný.
   # Použití: _gh-conf-validate-repo <key> <ghName> <errors_ref> <profiles_seen_ref> <domains_seen_ref>
   local _pk="$1" _gh_name="$2" _rel="projects/$1/$2.conf" _prefix="repos/$1/$2"
-  local _field _value _teams
+  local _field _value _teams _wh_url
   if [[ -z "${_GH_CONF_KEYS[$_prefix]:-}" ]]; then
     _gh-conf-err "$3" "$_rel" "soubor nastavení repa bez klíčů — smaž ho, nebo uveď aspoň jeden z klíčů: ${_GH_CONF_REPO_FIELDS// /, }"
     return 0
@@ -478,6 +515,16 @@ _gh-conf-validate-repo() {
     _gh-conf-validate-pr-reviewers "$_value" "$_teams" "$_rel" 1 "$3"
   fi
   _gh-conf-validate-default-branch "${_GH_CONF[$_prefix/default_branch]:-}" "$_rel" "$3"
+  # Efektivní URL pro kontrolu webhook_events: URL nastavení repa (none =
+  # žádná), jinak URL projektu.
+  _value="${_GH_CONF[$_prefix/webhook_url]:-}"
+  if [[ -v _GH_CONF["$_prefix/webhook_url"] ]]; then
+    _wh_url="$_value"
+  else
+    _wh_url="${_GH_CONF[projects/$_pk/webhook_url]:-}"
+  fi
+  _gh-conf-validate-webhook "$_value" "${_GH_CONF[$_prefix/webhook_events]:-}" \
+    "$_rel" 1 "$_wh_url" "$3"
   return 0
 }
 
@@ -500,8 +547,11 @@ _gh-conf-repo-settings-keys() {
 
 _gh-conf-effective() {
   # Naplní nameref efektivní hodnotou klíče repa (defs/defs.md, nastavení
-  # repa): rulesets, pr_reviewers_team a default_branch = hodnota nastavení
-  # repa, jinak projektu (pr_reviewers_team=none → prázdný řetězec = žádný tým);
+  # repa): rulesets, pr_reviewers_team, default_branch, webhook_url
+  # a webhook_events = hodnota nastavení repa, jinak projektu
+  # (pr_reviewers_team=none / webhook_url=none → prázdný řetězec = žádný tým /
+  # žádný spravovaný webhook; webhook_events bez hodnoty zůstává prázdné –
+  # default doplňuje _gh-conf-webhook);
   # repository_teams = CSV projektu + repository_teams_add (bez dedup —
   # překryv zakazuje validátor); ostatní pole = hodnota projektu. Prázdný
   # <ghName> = hodnota projektu (projektové výpisy, admin tým projektu).
@@ -519,12 +569,44 @@ _gh-conf-effective() {
       _add="${_GH_CONF[$_r/repository_teams_add]:-}"
       [[ -z "$_add" ]] || _ce_out+="${_ce_out:+,}$_add"
       ;;
-    rulesets|pr_reviewers_team|default_branch)
+    rulesets|pr_reviewers_team|default_branch|webhook_url|webhook_events)
       [[ -v _GH_CONF["$_r/$_field"] ]] || return 0
       _ce_out="${_GH_CONF[$_r/$_field]}"
-      [[ "$_field" == pr_reviewers_team && "$_ce_out" == "$_GH_CONF_NONE" ]] && _ce_out=""
+      [[ "$_field" == pr_reviewers_team || "$_field" == webhook_url ]] && \
+        [[ "$_ce_out" == "$_GH_CONF_NONE" ]] && _ce_out=""
       ;;
   esac
+  return 0
+}
+
+_gh-conf-webhook() {
+  # Efektivní spravovaný webhook repa (defs/defs.md, webhook repa) a jeho
+  # zdroj: <url_ref> = efektivní webhook_url (prázdná = žádný spravovaný
+  # webhook), <events_ref> = efektivní webhook_events, bez klíče
+  # GH_WEBHOOK_EVENTS_DEFAULT (prázdné, když není URL), <source_ref> = repo
+  # (nastavení repa) | repo_none (nastavení repa má none) | project | none
+  # (projekt klíč nemá). Offline nad _GH_CONF, hodnoty nevaliduje (prošly
+  # parserem). Jedno místo priority nastavení repa > projekt — používá klient
+  # gh-new, gh-project-info i governance modul webhooků.
+  # Použití: _gh-conf-webhook <key> <ghName> <url_ref> <events_ref> <source_ref>
+  declare -n _cw_url="$3" _cw_events="$4" _cw_source="$5"
+  local _r="repos/$1/$2"
+  _cw_url=""; _cw_events=""; _cw_source=none
+  if [[ -n "$2" && -v _GH_CONF["$_r/webhook_url"] ]]; then
+    if [[ "${_GH_CONF[$_r/webhook_url]}" == "$_GH_CONF_NONE" ]]; then
+      _cw_source=repo_none
+      return 0
+    fi
+    _cw_url="${_GH_CONF[$_r/webhook_url]}"
+    _cw_source=repo
+  elif [[ -n "${_GH_CONF[projects/$1/webhook_url]:-}" ]]; then
+    _cw_url="${_GH_CONF[projects/$1/webhook_url]}"
+    _cw_source=project
+  else
+    return 0
+  fi
+  _gh-conf-effective "$1" "$2" webhook_events _cw_events
+  [[ -n "$_cw_events" ]] || _cw_events="${GH_WEBHOOK_EVENTS_DEFAULT:-push}"
   return 0
 }
 

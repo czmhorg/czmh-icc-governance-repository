@@ -1,0 +1,99 @@
+# GENEROVANO gov-sync.sh -- needitovat v gov repu
+# Workflow repo-sync: cílená distribuce nastavení obsahu a webhooku pro
+# jeden projekt (defs/defs-governance-repo.md, repo-sync issue; do 2026-09-24
+# codeowners-sync). Provede nad nearchivovanými spravovanými repy projektu
+# tutéž správu .github/CODEOWNERS a CODEOWNERS_README.md (pr_reviewers_team)
+# a webhooku (webhook_url, webhook_events) jako daily-reconcile a nic jiného;
+# daily-reconcile zůstává pojistkou (repa v migraci, změny šablon, selhané
+# zápisy).
+# Dva triggery:
+#   - issue s labelem repo-sync (tělo project_key=<key>): parse job čte
+#     event soubor (tělo se nikdy neinterpoluje do run:), execute dostává
+#     zvalidované hodnoty přes env. Bez autorizace autora (jako track-delete)
+#     – sync jen konverguje repa k conf.d. Issue se vždy zavře completed
+#     s reportem v komentáři; rc 1 při error položce (viditelnost na běhu).
+#   - push do conf.d/projects/** ve výchozí větvi gov repa: dotčené projekty
+#     se odvodí z cest změněných souborů (before..HEAD, HEAD = aktuální
+#     výchozí větev, ne commit pushe); neznámý/nulový before = všechny
+#     projekty. Report jen do souhrnu běhu. Změna webhook_url se tak projeví
+#     hned po merge.
+# Concurrency: issue běhy per projekt (group repo-sync-<key>); push běhy
+# každý vlastní skupinu (github.sha) – ve skupině je nejvýš 1 running +
+# 1 pending a nový příchozí pending zruší (docs/github/actions-concurrency.md),
+# tři rychlé merge do conf.d by prostřední rozsah nikdy nezpracovaly. Souběh
+# dvou běhů nad týmž repem je stejný přípustný závod jako s daily-reconcile
+# (HTTP 409 = error položka, dorovná další běh).
+# Push jen z výchozí větve: environment bot má deployment branch policy jen
+# na ni (job z jiné větve by na secretu selhal); job-level if job mimo
+# výchozí větev přeskočí (skipped). on: push bez branches: reaguje i na tagy –
+# podmínka github.ref je vyloučí. Push PAT bota workflow spouští
+# (docs/github/version-bump-auto-push.md): commity state/ vyloučí jen filtr
+# cest (jediná bariéra proti smyčce; gov-sync conf.d nesyncuje). Každé
+# otevřené issue vytvoří běh se skipnutými joby jako u ostatních workflow.
+name: repo-sync
+
+on:
+  issues:
+    types: [opened]
+  push:
+    paths: ['conf.d/projects/**']
+
+permissions:
+  contents: read
+
+jobs:
+  parse:
+    if: github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'repo-sync')
+    runs-on: ubuntu-latest
+    environment: bot
+    outputs:
+      result: ${{ steps.parse.outputs.result }}
+      issue_number: ${{ steps.parse.outputs.issue_number }}
+      project_key: ${{ steps.parse.outputs.project_key }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Parse issue
+        id: parse
+        env:
+          GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+          GH_ENTERPRISE_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+        run: bash bin/gov-repo-sync.sh --parse
+
+  execute:
+    needs: [parse]
+    if: >-
+      always() && !cancelled() && (
+        (github.event_name == 'issues' && needs.parse.outputs.result == 'ok')
+        || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+      )
+    runs-on: ubuntu-latest
+    environment: bot
+    timeout-minutes: 30
+    concurrency:
+      group: repo-sync-${{ needs.parse.outputs.project_key || github.sha }}
+    steps:
+      # Vždy HEAD výchozí větve, ne github.sha pushe: běhy dvou rychlých merge
+      # se mohou vykonat v opačném pořadí a starší běh by zapsal starší
+      # konfiguraci (ověřeno v pískovišti, docs/github/actions-checkout-sha-poradi-behu.md).
+      # Rozsah diffu před-SHA..HEAD tím jen roste (nadmnožina nevadí).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GOV_BOT_TOKEN }}
+      - name: Repo-sync (CODEOWNERS a webhook)
+        env:
+          GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+          GH_ENTERPRISE_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PROJECT_KEY: ${{ needs.parse.outputs.project_key }}
+          ISSUE_NUMBER: ${{ needs.parse.outputs.issue_number }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "$EVENT_NAME" == push ]]; then
+            bash bin/gov-repo-sync.sh --push "$BEFORE_SHA"
+          else
+            bash bin/gov-repo-sync.sh --execute "$PROJECT_KEY" "$ISSUE_NUMBER"
+          fi

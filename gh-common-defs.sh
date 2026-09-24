@@ -52,6 +52,12 @@ _BB_MIGRATION_TOPIC_MARKER_DONE=bb-gh-migrated
 # nehlásí. Migrace (bb-migrate.sh) ji nastavuje natvrdo – jde o nové repo.
 : "${GH_DEPLOYMENT_TARGET_DEFAULT:=PRODUCTION}"
 
+# Výchozí události spravovaného webhooku rep (defs/defs.md: webhook repa) –
+# platí pro repa bez klíče webhook_events v conf.d. push stačí triggeru GitHub
+# pluginu Jenkinsu („GitHub hook trigger for GITScm polling“); multibranch
+# pipeline potřebuje navíc pull_request (klíč webhook_events projektu).
+: "${GH_WEBHOOK_EVENTS_DEFAULT:=push}"
+
 # Governance repo — autoritativní umístění conf.d na GitHubu.
 # Odvozený identifikátor <ghGlobalPrefix>-governance-repository (defs/defs.md).
 : "${GH_GOVERNANCE_REPO:=${GH_REPO_PREFIX}-governance-repository}"
@@ -117,6 +123,11 @@ _GH_PROJECT_KEY_REGEX='^[a-z0-9]+$'
 # builtiny a hodnota jde do JSON těla `branches/{branch}/rename`. Úplnou
 # kontrolu (zákaz '..' a přípony .lock) dělá _gh-branch-name-valid.
 _GH_BRANCH_NAME_REGEX='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+# Formát URL spravovaného webhooku (klíč webhook_url, defs/defs.md: webhook
+# repa) a názvu události hooku (položka klíče webhook_events; samotná `*`
+# = všechny události). Platnost názvu události ověřuje až GitHub API.
+_GH_WEBHOOK_URL_REGEX='^https?://[^[:space:]]+$'
+_GH_WEBHOOK_EVENT_REGEX='^[a-z_]+$'
 
 # Kořenový adresář lokálních kopií repozitářů (workspace). Workspace funkce
 # (gh-clone, gh-cd, gh-open, gh-project-clone, gh-sync, gh-status) pracují
@@ -151,7 +162,7 @@ _GH_BRANCH_NAME_REGEX='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 
 # Maximální stáří cache vzdálené verze skriptů v minutách před background
 # fetchem toolkit repa (kontrola verze skriptů; výchozí 1440 = jednou denně).
-: "${GH_VERSION_CHECK_TTL_MIN:=1440}"
+: "${GH_VERSION_CHECK_TTL_MIN:=10}"
 
 # Hlášení čekajících PR ve funkcích gh-* („Máš 1 schválený PR k merge, 2 PR
 # čekají na tvoje review → gh-pr-list"; docs/implementovano/navrh/gh-pr-funkce.md): maximální

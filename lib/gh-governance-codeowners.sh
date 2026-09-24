@@ -9,8 +9,8 @@
 # svému bypass týmu — bypass actor Team/always, defs/defs.md: bypass tym).
 # Jediné místo, kde governance zapisuje obsah spravovaných
 # rep — výhradně v souborech/sekcích označených vlastními značkami.
-# Volají ji: denní reconcile (hlavní smyčka), workflow codeowners-sync
-# (_gh-governance-codeowners-sync-run — jeden projekt, spouští governance
+# Volají ji: denní reconcile (hlavní smyčka), workflow repo-sync
+# (lib/gh-governance-repo-sync.sh — jeden projekt, spouští governance
 # issue nebo push do conf.d/projects/**) a workflow životního cyklu repa
 # (_gh-governance-codeowners-apply-note — jedno repo, výsledek jako řádek
 # komentáře issue). Vlastník = efektivní pr_reviewers_team repa (nastavení
@@ -18,12 +18,8 @@
 # Závislosti: gh-common-defs.sh (_gh-match, _require_vars, GH_REPO_PREFIX,
 # topicy migrace), lib/gh-conf.sh (_gh-conf-effective),
 # lib/gh-governance-report.sh, lib/gh-governance-state.sh
-# (_gh-governance-checkout-root, _gh-governance-conf-effective-at-commit,
-# _gh-governance-state-read, _gh-governance-run-sha),
-# lib/gh-governance-deploy-manifest.sh (strip hlavičky šablon),
-# lib/gh-governance-reconcile.sh (_gh-governance-org-repos-list,
-# _gh-governance-classify — jen sync-run; reconcile tento modul sourcuje
-# první, volání jsou až za běhu, pořadí sourcování nevadí).
+# (_gh-governance-checkout-root, _gh-governance-conf-effective-at-commit),
+# lib/gh-governance-deploy-manifest.sh (strip hlavičky šablon).
 [[ -n "${_GH_GOVERNANCE_CODEOWNERS_LOADED:-}" ]] && \
   declare -F _gh-governance-reconcile-codeowners >/dev/null && return 0
 _GH_GOVERNANCE_CODEOWNERS_LOADED=1
@@ -417,98 +413,6 @@ _gh-governance-reconcile-codeowners() {
   _gh-governance-codeowners-readme-sync "$_repo_path" "$_branch" "$_root" \
     "$_key" "$_owners" "$_managed" || return 1
   [[ -n "$_owners" ]] && { _gh-governance-codeowners-teams-check "$_repo_path" "$_key" "$_gh_name" || return 1; }
-  return 0
-}
-
-_gh-governance-codeowners-sync-keys-from-paths() {
-  # Odvodí klíče projektů z cest změněných souborů gov repa (push trigger
-  # workflow codeowners-sync): `conf.d/projects/<key>.conf` (projekt) i
-  # `conf.d/projects/<key>/<ghName>.conf` (nastavení repa) → <key>; hlubší
-  # cesty a soubory bez přípony .conf se ignorují. Výstup bez duplicit,
-  # setříděný LC_ALL=C. Nadmnožina nevadí (sync je idempotentní); klíč, který
-  # v HEAD conf.d už neexistuje, ohlásí sync-run. Čistá funkce.
-  # Použití: _gh-governance-codeowners-sync-keys-from-paths <cesty po řádcích> <array_ref>
-  declare -n _kp_ref="$2"
-  local _kp_line _kp_rest _kp_key
-  local -A _kp_seen=()
-  _kp_ref=()
-  while IFS= read -r _kp_line; do
-    [[ "$_kp_line" == conf.d/projects/* ]] || continue
-    _kp_rest="${_kp_line#conf.d/projects/}"
-    if [[ "$_kp_rest" == */* ]]; then
-      _kp_key="${_kp_rest%%/*}"
-      _kp_rest="${_kp_rest#*/}"
-      [[ "$_kp_rest" == */* ]] && continue
-    else
-      _kp_key="${_kp_rest%.conf}"
-    fi
-    [[ "$_kp_rest" == *.conf && -n "$_kp_key" ]] || continue
-    _kp_seen["$_kp_key"]=1
-  done <<< "$1"
-  [[ ${#_kp_seen[@]} -gt 0 ]] || return 0
-  mapfile -t _kp_ref < <(printf '%s\n' "${!_kp_seen[@]}" | LC_ALL=C sort)
-}
-
-_gh-governance-codeowners-sync-run() {
-  # Cílená distribuce CODEOWNERS pro zadané projekty (workflow codeowners-sync,
-  # defs/defs-governance-repo.md): nad nearchivovanými spravovanými repy
-  # projektů volá _gh-governance-reconcile-codeowners se stejnou tolerancí
-  # selhání jako reconcile-run (error `neuspesna reconciliace repa`,
-  # pokračuje dalším repem). Nic jiného nemění — ukazatel state/ čte jen
-  # pro heuristiku úrovně hlášení a neposouvá ho. Položky reportu navíc
-  # (jen info): `projekt bez konfigurace` (klíč mimo conf.d HEAD),
-  # `codeowners v migraci vynechano` (repo s topicem migrace; funkce ho sama
-  # přeskočí), `projekt bez rep`. Report musí být inicializován
-  # (_gh-governance-report-init). rc != 0 jen při selhání infrastruktury
-  # běhu (checkout gov repa, výpis rep organizace).
-  # Použití: _gh-governance-codeowners-sync-run <projectKey>...
-  local _listing _name _archived _branch _topics _extra _class _value
-  local _key _err_file _pointer _k
-  local -A _wanted=() _seen=()
-  _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX GH_PROJECT_TOPIC_PREFIX || return 1
-  if [[ $# -eq 0 ]]; then
-    echo "Chyba: Zadej aspoň jeden projectKey." >&2
-    return 1
-  fi
-  _gh-governance-run-sha >/dev/null || return 1
-  for _k in "$@"; do
-    if [[ -z "${_GH_CONF[projects/$_k/domain]:-}" ]]; then
-      _gh-governance-report-add info "projekt bez konfigurace" "$_k" \
-        "projekt v conf.d (HEAD) neexistuje — vynechán"
-      continue
-    fi
-    _wanted["$_k"]=1
-  done
-  [[ ${#_wanted[@]} -gt 0 ]] || return 0
-  _listing=$(_gh-governance-org-repos-list) || {
-    echo "Chyba: Výpis rep organizace '$GITHUB_ORG' selhal." >&2
-    return 1
-  }
-  while IFS=$'\t' read -r _name _archived _branch _topics _extra; do
-    [[ -n "$_name" ]] || continue
-    IFS=$'\t' read -r _class _value <<< "$(_gh-governance-classify "$_name" "$_topics")"
-    [[ "$_class" == spravovane && -n "${_wanted[$_value]:-}" ]] || continue
-    [[ "$_archived" == true ]] && continue
-    _key="$_value"
-    _seen["$_key"]=1
-    [[ ",$_topics," == *",${_BB_MIGRATION_TOPIC_MARKER},"* ]] && \
-      _gh-governance-report-add info "codeowners v migraci vynechano" \
-        "${GITHUB_ORG}/${_name}" \
-        "repo s topicem ${_BB_MIGRATION_TOPIC_MARKER} — CODEOWNERS se nezapisuje, dorovná se po uzavření migrace"
-    _pointer=$(_gh-governance-state-read "$_name" 2>/dev/null) || _pointer=""
-    _err_file=$(mktemp) || return 1
-    if ! _gh-governance-reconcile-codeowners "$_name" "$_branch" "$_key" \
-        "$_topics" "$_pointer" 2>"$_err_file"; then
-      _gh-governance-report-add error "neuspesna reconciliace repa" \
-        "${GITHUB_ORG}/${_name}" "správa CODEOWNERS: $(tail -n 1 "$_err_file")"
-    fi
-    rm -f "$_err_file"
-  done <<< "$_listing"
-  while IFS= read -r _k; do
-    [[ -n "$_k" && -z "${_seen[$_k]:-}" ]] || continue
-    _gh-governance-report-add info "projekt bez rep" "$_k" \
-      "projekt nemá žádné nearchivované spravované repo"
-  done < <(printf '%s\n' "${!_wanted[@]}" | LC_ALL=C sort)
   return 0
 }
 

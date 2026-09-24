@@ -7,7 +7,9 @@
 # Závislosti: gh-common-defs.sh, lib/gh-conf.sh, lib/gh-repository-policy.sh,
 # lib/gh-governance-state.sh, lib/gh-governance-manifest.sh,
 # lib/gh-governance-codeowners.sh (_gh-governance-codeowners-apply-note –
-# zápis CODEOWNERS při založení a dearchivaci repa).
+# zápis CODEOWNERS při založení a dearchivaci repa),
+# lib/gh-governance-webhooks.sh (_gh-governance-webhook-apply-note – webhook
+# dle webhook_url tamtéž).
 [[ -n "${_GH_GOVERNANCE_REPO_OPS_LOADED:-}" ]] && \
   declare -F _gh-governance-new >/dev/null && return 0
 _GH_GOVERNANCE_REPO_OPS_LOADED=1
@@ -247,15 +249,16 @@ _gh-governance-new() {
   # odebrání týmů dle ukazatele, posun ukazatele + push.
   # Existující repo není chyba – provede se jen konvergence (větev se
   # nepřejmenovává). Po pushi ukazatele zapíše CODEOWNERS dle
-  # pr_reviewers_team (_gh-governance-codeowners-apply-note; selhání = jen
-  # poznámka, dorovná reconcile – zápis nesmí ohrozit push ukazatele).
+  # pr_reviewers_team (_gh-governance-codeowners-apply-note) a webhook dle
+  # webhook_url (_gh-governance-webhook-apply-note); selhání = jen poznámka,
+  # dorovná reconcile – zápis nesmí ohrozit push ukazatele.
   # Volitelný <note_ref> dostane víceřádkovou poznámku pro komentář issue:
-  # větu o výchozí větvi (jen při zásahu) a řádek CODEOWNERS (vždy); na
-  # stdout se vypíše vždy.
+  # větu o výchozí větvi (jen při zásahu), řádek CODEOWNERS a řádek Webhook
+  # (vždy); na stdout se vypíše vždy.
   # Použití: _gh-governance-new <projectKey> <ghName> [<note_ref>]
   local _key="$1" _name="$2" _mhn _repo_name _repo_path _branch
   local _adopted=false _removed_login="" _created=false _branch_note=""
-  local _pointer="" _co_note=""
+  local _pointer="" _co_note="" _wh_note=""
   local -a _removed=()
   local -A _info=()
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX GH_PROJECT_TOPIC_PREFIX GH_NEW_REPO_VISIBILITY || return 1
@@ -317,6 +320,8 @@ _gh-governance-new() {
   _gh-governance-state-push "new-repository: $_repo_name" || return 1
   _gh-governance-codeowners-apply-note "$_repo_name" "$_branch" "$_key" \
     "${_info[topics]}" "$_pointer" _co_note
+  _gh-governance-webhook-apply-note "$_repo_name" "$_key" "${_info[topics]}" \
+    "$_pointer" _wh_note
   [[ ${#_removed[@]} -gt 0 ]] && \
     printf 'Odebrán tým dle diffu konfigurace: %s\n' "${_removed[@]}"
   [[ -n "$_removed_login" ]] && \
@@ -324,10 +329,10 @@ _gh-governance-new() {
   echo "Hotovo: repo '$_repo_path' odpovídá INI konfiguraci projektu '$_key'."
   _gh-governance-repo-settings-note "$_key" "$_name" used
   [[ -z "$_branch_note" ]] || printf '%s\n' "$_branch_note"
-  printf '%s\n' "$_co_note"
+  printf '%s\n' "$_co_note" "$_wh_note"
   if [[ -n "${3:-}" ]]; then
     declare -n _new_note_ref="$3"
-    _new_note_ref="${_branch_note}${_branch_note:+$'\n'}${_co_note}"
+    _new_note_ref="${_branch_note}${_branch_note:+$'\n'}${_co_note}"$'\n'"${_wh_note}"
   fi
   return 0
 }
@@ -366,13 +371,13 @@ _gh-governance-unarchive() {
   # Dearchivuje spravované repo projektu a hned aplikuje politiku včetně
   # odebrání týmů dle zmrazeného ukazatele; po úspěchu ukazatel posune.
   # Nearchivované repo není chyba – provede se jen konvergence. Po pushi
-  # ukazatele zapíše CODEOWNERS dle pr_reviewers_team (archivované repo
-  # reconcile přeskakuje – po dearchivaci má odpovídat i v CODEOWNERS;
-  # selhání = jen poznámka). Volitelný <note_ref> dostane řádek CODEOWNERS
-  # pro komentář issue; na stdout se vypíše vždy.
+  # ukazatele zapíše CODEOWNERS dle pr_reviewers_team a webhook dle
+  # webhook_url (archivované repo reconcile přeskakuje – po dearchivaci má
+  # odpovídat i v nich; selhání = jen poznámka). Volitelný <note_ref> dostane
+  # řádky CODEOWNERS a Webhook pro komentář issue; na stdout se vypíší vždy.
   # Použití: _gh-governance-unarchive <projectKey> <ghName> [<note_ref>]
   local _key="$1" _name="$2" _mhn _repo_name _repo_path _branch
-  local _adopted=false _removed_login="" _pointer="" _co_note=""
+  local _adopted=false _removed_login="" _pointer="" _co_note="" _wh_note=""
   local -a _removed=()
   local -A _info=()
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX GH_PROJECT_TOPIC_PREFIX || return 1
@@ -408,6 +413,8 @@ _gh-governance-unarchive() {
   _gh-governance-state-push "unarchive-repository: $_repo_name" || return 1
   _gh-governance-codeowners-apply-note "$_repo_name" "$_branch" "$_key" \
     "${_info[topics]}" "$_pointer" _co_note
+  _gh-governance-webhook-apply-note "$_repo_name" "$_key" "${_info[topics]}" \
+    "$_pointer" _wh_note
   [[ "$_adopted" == true ]] && \
     echo "Adopce repa: ukazatel posledního aplikovaného stavu založen, nic se neodebíralo."
   [[ ${#_removed[@]} -gt 0 ]] && \
@@ -415,10 +422,10 @@ _gh-governance-unarchive() {
   [[ -n "$_removed_login" ]] && \
     echo "Odebrán Jenkins collaborator '$_removed_login' dle diffu konfigurace."
   echo "Hotovo: repo '$_repo_path' odpovídá INI konfiguraci projektu '$_key'."
-  printf '%s\n' "$_co_note"
+  printf '%s\n' "$_co_note" "$_wh_note"
   if [[ -n "${3:-}" ]]; then
     declare -n _ua_note_ref="$3"
-    _ua_note_ref="$_co_note"
+    _ua_note_ref="${_co_note}"$'\n'"${_wh_note}"
   fi
   return 0
 }
