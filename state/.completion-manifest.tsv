@@ -4,6 +4,6 @@ multi	govtest1	true
 pata-app	govtest1	false
 adopt	govtest2	false
 druha-app	govtest2	false
-prvni-app	govtest2	false
+prvni-app	govtest2	true
 treti-app	govtest2	false
 wh-a	govtest2	false
