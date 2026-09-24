@@ -2,7 +2,7 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
 # Správa spravovaného webhooku spravovaných rep podle klíčů webhook_url
-# a webhook_events (defs/defs.md: webhook repa; docs/navrh/webhooky-rep.md).
+# a webhook_events (defs/defs.md: webhook repa; docs/implementovano/navrh/webhooky-rep.md).
 # Hook identifikuje přesná shoda config.url s efektivní webhook_url: chybí →
 # POST, liší se → PATCH, stará URL dle diffu ukazatele → DELETE; ručně
 # založené hooky (jiná URL) se jen hlásí. Po založení hooku se pošle ping
