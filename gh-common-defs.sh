@@ -58,6 +58,13 @@ _BB_MIGRATION_TOPIC_MARKER_DONE=bb-gh-migrated
 # pipeline potřebuje navíc pull_request (klíč webhook_events projektu).
 : "${GH_WEBHOOK_EVENTS_DEFAULT:=push}"
 
+# Max. stáří otevřeného reconcile issue ve dnech (defs/defs-governance-repo.md:
+# reconcile issue, bod 4). Trvalá zjištění by issue držela otevřené neomezeně
+# (pondělní běh přidává komentář); po dosažení stáří ho pondělní běh se
+# zjištěními zavře jako not_planned se závěrečným komentářem a založí nové
+# (rotace). 0 = rotace při každém pondělním běhu se zjištěními – jen ověření.
+: "${GH_RECONCILE_ISSUE_MAX_AGE_DAYS:=90}"
+
 # Governance repo — autoritativní umístění conf.d na GitHubu.
 # Odvozený identifikátor <ghGlobalPrefix>-governance-repository (defs/defs.md).
 : "${GH_GOVERNANCE_REPO:=${GH_REPO_PREFIX}-governance-repository}"
@@ -138,8 +145,16 @@ _GH_WEBHOOK_EVENT_REGEX='^[a-z_]+$'
 # Nezapomeň: používej ${HOME}/..., ne ~/... (tilda se neexpanduje ve všech kontextech).
 : "${GH_WORKSPACE_ROOT:=${HOME}/github/workspace}"
 
-# Editor pro gh-open (bez --web). Výchozí: code (VS Code).
+# Aplikace pro gh-open bez přepínače. Výchozí: code (VS Code). Hodnota je
+# shell příkaz (jako GH_BROWSER): cesta s mezerami v uvozovkách, argumenty
+# možné, cesta k adresáři se připojí na konec; gh-open ji spouští na pozadí
+# (_gh-open-in-editor).
 # GH_EDITOR=code
+
+# Grafický klient gitu pro gh-open --git (Sourcetree, Fork, GitKraken, …).
+# Bez výchozí hodnoty — bez nastavení je --git chyba s hintem. Stejná
+# konvence jako GH_EDITOR; Sourcetree na Windows chce před cestou -f.
+# GH_GIT_GUI=
 
 # Repo, jehož issue workflow provádí mazání rep (axiom Práva členů organizace,
 # defs/defs.md) – černá skříňka spravovaná organizací; klientem je gh-delete.
