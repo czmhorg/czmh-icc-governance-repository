@@ -64,20 +64,25 @@ _gh-governance-webhook-list() {
 
 _gh-governance-webhook-plan() {
   # Rozhodne akce nad hooky repa. Čistá funkce; vypíše po řádcích:
-  #   delete\t<id>\t<old_url>   – hook staré URL dle diffu ukazatele,
+  #   delete\t<id>\t<old_url>   – hook staré URL (diff ukazatele / přesun),
   #   update\t<id>\t<co se liší> – spravovaný hook (URL = <url>) s odchylkou,
   #   create\t<url>             – spravovaný hook chybí,
   #   extra\t<id>\t<url>        – hook s jinou URL (jen když <url> neprázdná).
   # Shoda = žádný řádek. Prázdná <url> (repo bez klíče / none) = jen delete
-  # staré URL. Prázdná <old_url> nebo shodná s <url> = nic se nemaže.
-  # Použití: _gh-governance-webhook-plan <listingTSV> <url> <eventsCSV> <old_url>
-  local _listing="$1" _url="$2" _events="$3" _old="$4"
-  local _id _hurl _active _ct _ssl _hev _found=0 _diff _want=""
+  # starých URL. <old_urls> = staré URL po řádcích (může být víc – historie
+  # mezi ukazatelem a HEAD); prázdné nebo shodné s <url> = nic se nemaže.
+  # Použití: _gh-governance-webhook-plan <listingTSV> <url> <eventsCSV> <old_urls>
+  local _listing="$1" _url="$2" _events="$3" _old_urls="$4"
+  local _id _hurl _active _ct _ssl _hev _found=0 _diff _want="" _old
+  local -A _old_set=()
   [[ -n "$_url" ]] && _gh-governance-webhook-events-normalize "$_events" _want
+  while IFS= read -r _old; do
+    [[ -n "$_old" && "$_old" != "$_url" ]] && _old_set["$_old"]=1
+  done <<< "$_old_urls"
   while IFS=$'\t' read -r _id _hurl _active _ct _ssl _hev; do
     [[ -n "$_id" ]] || continue
-    if [[ -n "$_old" && "$_hurl" == "$_old" && "$_old" != "$_url" ]]; then
-      printf 'delete\t%s\t%s\n' "$_id" "$_old"
+    if [[ -n "$_hurl" && -v _old_set["$_hurl"] ]]; then
+      printf 'delete\t%s\t%s\n' "$_id" "$_hurl"
     elif [[ -n "$_url" && "$_hurl" == "$_url" ]]; then
       _found=1
       _diff=""
@@ -186,30 +191,33 @@ _gh-governance-webhook-conf-unchanged() {
 _gh-governance-reconcile-webhook() {
   # Správa webhooku jednoho spravovaného nearchivovaného repa dle efektivní
   # webhook_url/webhook_events (defs/defs.md, webhook repa). Repo s topicem
-  # migrace se přeskakuje celé (hook až po uzavření migrace). Stará URL
+  # migrace se přeskakuje celé (hook až po uzavření migrace). Staré URL
   # k odebrání: <old_url> od volajícího (přesun/přejmenování repa), jinak
-  # diff ukazatele <pointer_sha> → RUN_SHA. Bez efektivní URL a bez staré URL
-  # = 0 API volání (projekt bez klíče). Položky reportu: sprava webhooku
-  # (info), rucni zasah do webhooku (warning – hook se lišil, konfigurace od
-  # ukazatele beze změny), webhook prirazeny navic (warning). Ping jen po
-  # založení. rc != 0 → volající hlásí error a pokračuje dalším repem.
+  # všechny efektivní URL z historie konfigurace ukazatel <pointer_sha> →
+  # RUN_SHA (_gh-governance-webhook-urls-to-remove). Bez efektivní URL a bez
+  # staré URL = 0 API volání (projekt bez klíče). Položky reportu: sprava
+  # webhooku (info), rucni zasah do webhooku (warning – hook se lišil,
+  # konfigurace od ukazatele beze změny), webhook prirazeny navic (warning).
+  # Ping jen po založení. rc != 0 → volající hlásí error a pokračuje dalším repem.
   # Použití: _gh-governance-reconcile-webhook <repoName> <projectKey>
   #          <topicsCSV> <pointer_sha|''> [old_url]
-  local _name="$1" _key="$2" _topics="$3" _pointer_sha="$4" _old_url="${5:-}"
+  local _name="$1" _key="$2" _topics="$3" _pointer_sha="$4" _old_urls="${5:-}"
   local _gh_name="${_name#"${GH_REPO_PREFIX}-${_key}-"}"
   local _repo_path="${GITHUB_ORG}/${_name}" _url="" _events="" _source=""
   local _run_sha _listing _plan _action _a2 _a3 _payload _id _ping
+  local -a _old_list=()
   [[ ",$_topics," == *",${_BB_MIGRATION_TOPIC_MARKER},"* ]] && return 0
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX || return 1
   _gh-conf-webhook "$_key" "$_gh_name" _url _events _source
-  if [[ -z "$_old_url" && -n "$_pointer_sha" ]]; then
+  if [[ -z "$_old_urls" && -n "$_pointer_sha" ]]; then
     _run_sha=$(_gh-governance-run-sha) || return 1
-    _gh-governance-webhook-url-to-remove "$_key" "$_gh_name" "$_pointer_sha" "$_run_sha" _old_url \
+    _gh-governance-webhook-urls-to-remove "$_key" "$_gh_name" "$_pointer_sha" "$_run_sha" _old_list \
       || return 1
+    [[ ${#_old_list[@]} -eq 0 ]] || _old_urls=$(printf '%s\n' "${_old_list[@]}")
   fi
-  [[ -n "$_url" || -n "$_old_url" ]] || return 0
+  [[ -n "$_url" || -n "$_old_urls" ]] || return 0
   _listing=$(_gh-governance-webhook-list "$_repo_path") || return 1
-  _plan=$(_gh-governance-webhook-plan "$_listing" "$_url" "$_events" "$_old_url")
+  _plan=$(_gh-governance-webhook-plan "$_listing" "$_url" "$_events" "$_old_urls")
   [[ -n "$_plan" ]] || return 0
   _payload=""
   [[ -z "$_url" ]] || _payload=$(_gh-governance-webhook-payload "$_url" "$_events")

@@ -261,38 +261,41 @@ _gh-governance-jenkins-to-remove() {
   _gh-governance-jenkins-to-remove-between "$1" "$2" "$1" "$3" "$4"
 }
 
-_gh-governance-webhook-url-to-remove-between() {
-  # Naplní nameref URL spravovaného webhooku k odebrání (defs/defs.md, webhook
-  # repa): efektivní webhook_url repa oldKey/oldGhName na SHA old_sha, pokud je
-  # neprázdná a liší se od efektivní webhook_url repa newKey/newGhName na SHA
-  # new_sha (změna URL, none v nastavení repa, odebrání klíče). Jednoklíčové
-  # volání = diff ukazatel→RUN_SHA; dvouklíčové přesun/přejmenování repa
-  # (move-repository, rename-repository). Pojistka: URL z aktuálně načtené
-  # efektivní konfigurace repa newKey/newGhName (_GH_CONF) se nikdy neodebírá.
-  # rc 1 = chyba (git/parsování) – volající nesmí odebírat.
-  # Použití: local _u; _gh-governance-webhook-url-to-remove-between <oldKey> <old_sha> <oldGhName> <newKey> <new_sha> <newGhName> _u
-  local _old_key="$1" _old_sha="$2" _old_gh_name="$3"
-  local _new_key="$4" _new_sha="$5" _new_gh_name="$6"
-  local _old="" _new="" _current=""
-  declare -n _rm_url_ref="$7"
-  _rm_url_ref=""
-  _gh-governance-conf-effective-at-commit "$_old_sha" "$_old_key" "$_old_gh_name" webhook_url _old \
+_gh-governance-webhook-urls-to-remove() {
+  # Naplní nameref pole URL spravovaného webhooku k odebrání (defs/defs.md,
+  # webhook repa): efektivní webhook_url repa na SHA ukazatele **a v každé
+  # verzi konfigurace mezi ukazatelem a RUN_SHA** (commity pointer..run_sha
+  # dotýkající se souboru projektu nebo nastavení repa), které se liší od
+  # efektivní URL na RUN_SHA. Průchod historií je nutný: workflow repo-sync
+  # hooky mění hned po každém merge, ale ukazatel neposouvá — mezi dvěma
+  # posuny ukazatele tak může vzniknout a zase zaniknout URL, kterou by diff
+  # dvou bodů neznal (ověřeno v pískovišti 2026-09-24: osiřelý hook).
+  # Pojistka: URL z aktuálně načtené efektivní konfigurace (_GH_CONF) se
+  # nikdy neodebírá. Prázdné pole = nic. rc 1 = chyba (git/parsování) –
+  # volající nesmí odebírat.
+  # Použití: local -a _u=(); _gh-governance-webhook-urls-to-remove <projectKey> <ghName> <pointer_sha> <run_sha> _u
+  local _key="$1" _gh_name="$2" _pointer_sha="$3" _run_sha="$4"
+  local _root _sha _url _new="" _current="" _shas
+  local -A _seen=()
+  local -a _paths=("conf.d/projects/$_key.conf")
+  declare -n _rm_urls_ref="$5"
+  _rm_urls_ref=()
+  [[ -n "$_gh_name" ]] && _paths+=("conf.d/projects/$_key/$_gh_name.conf")
+  _root=$(_gh-governance-checkout-root) || return 1
+  _shas=$(git -C "$_root" rev-list "${_pointer_sha}..${_run_sha}" -- "${_paths[@]}") || return 1
+  _gh-governance-conf-effective-at-commit "$_run_sha" "$_key" "$_gh_name" webhook_url _new \
     || return 1
-  [[ -n "$_old" ]] || return 0
-  _gh-governance-conf-effective-at-commit "$_new_sha" "$_new_key" "$_new_gh_name" webhook_url _new \
-    || return 1
-  [[ "$_old" != "$_new" ]] || return 0
-  _gh-conf-effective "$_new_key" "$_new_gh_name" webhook_url _current
-  [[ "$_old" != "$_current" ]] || return 0
-  _rm_url_ref="$_old"
+  _gh-conf-effective "$_key" "$_gh_name" webhook_url _current
+  for _sha in "$_pointer_sha" $_shas; do
+    [[ "$_sha" == "$_run_sha" ]] && continue
+    _gh-governance-conf-effective-at-commit "$_sha" "$_key" "$_gh_name" webhook_url _url \
+      || return 1
+    [[ -n "$_url" && "$_url" != "$_new" && "$_url" != "$_current" ]] || continue
+    [[ -v _seen["$_url"] ]] && continue
+    _seen["$_url"]=1
+    _rm_urls_ref+=("$_url")
+  done
   return 0
-}
-
-_gh-governance-webhook-url-to-remove() {
-  # Jednoklíčová zkratka _gh-governance-webhook-url-to-remove-between (diff
-  # ukazatel→RUN_SHA v rámci téhož projektu a repa).
-  # Použití: local _u; _gh-governance-webhook-url-to-remove <projectKey> <ghName> <pointer_sha> <run_sha> _u
-  _gh-governance-webhook-url-to-remove-between "$1" "$3" "$2" "$1" "$4" "$2" "$5"
 }
 
 _gh-governance-conf-teams-at-commit() {
