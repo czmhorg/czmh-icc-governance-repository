@@ -156,6 +156,12 @@ _GH_WEBHOOK_EVENT_REGEX='^[a-z_]+$'
 # konvence jako GH_EDITOR; Sourcetree na Windows chce před cestou -f.
 # GH_GIT_GUI=
 
+# Správce souborů pro gh-open --files (Total Commander, Explorer, …). Bez
+# nastavení výchozí správce OS (Linux xdg-open, macOS open, Windows explorer).
+# Stejná konvence jako GH_EDITOR; přepínače Windows programů s dvojitým
+# lomítkem (//O //T) — MSYS by jednoduché /O převedl na cestu.
+# GH_FILE_MANAGER=
+
 # Repo, jehož issue workflow provádí mazání rep (axiom Práva členů organizace,
 # defs/defs.md) – černá skříňka spravovaná organizací; klientem je gh-delete.
 # Default odvozen z GITHUB_ORG – žije vždy v aktuální organizaci.

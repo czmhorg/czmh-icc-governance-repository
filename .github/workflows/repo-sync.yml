@@ -7,9 +7,11 @@
 # daily-reconcile zůstává pojistkou (repa v migraci, změny šablon, selhané
 # zápisy).
 # Dva triggery:
-#   - issue s labelem repo-sync (tělo project_key=<key>): parse job čte
-#     event soubor (tělo se nikdy neinterpoluje do run:), execute dostává
-#     zvalidované hodnoty přes env. Bez autorizace autora (jako track-delete)
+#   - workflow_call z dispatcheru issue-dispatch.yml (governance issue
+#     s prefixem titulku `repo-sync: `, tělo project_key=<key>; joby běží
+#     v běhu dispatcheru, github kontext = událost issues volajícího): parse
+#     job čte event soubor (tělo se nikdy neinterpoluje do run:), execute
+#     dostává zvalidované hodnoty přes env. Bez autorizace autora (jako track-delete)
 #     – sync jen konverguje repa k conf.d. Issue se vždy zavře completed
 #     s reportem v komentáři; rc 1 při error položce (viditelnost na běhu).
 #   - push do conf.d/projects/** ve výchozí větvi gov repa: dotčené projekty
@@ -28,13 +30,12 @@
 # výchozí větev přeskočí (skipped). on: push bez branches: reaguje i na tagy –
 # podmínka github.ref je vyloučí. Push PAT bota workflow spouští
 # (docs/github/version-bump-auto-push.md): commity state/ vyloučí jen filtr
-# cest (jediná bariéra proti smyčce; gov-sync conf.d nesyncuje). Každé
-# otevřené issue vytvoří běh se skipnutými joby jako u ostatních workflow.
+# cest (jediná bariéra proti smyčce; gov-sync conf.d nesyncuje). Issue běhy
+# vznikají výhradně voláním z dispatcheru (jeden běh na issue).
 name: repo-sync
 
 on:
-  issues:
-    types: [opened]
+  workflow_call:
   push:
     paths: ['conf.d/projects/**']
 
@@ -43,7 +44,7 @@ permissions:
 
 jobs:
   parse:
-    if: github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'repo-sync')
+    if: github.event_name == 'issues'
     runs-on: ubuntu-latest
     environment: bot
     outputs:

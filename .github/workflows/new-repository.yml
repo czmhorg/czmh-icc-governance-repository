@@ -1,6 +1,10 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
-# Workflow new-repository: issue s labelem create-repo → založení spravovaného
+# Workflow new-repository: governance issue create-repo → založení spravovaného
 # repa dle INI konfigurace conf.d (návrh docs/navrh/governance/governance-repo.md).
+# Volá ho dispatcher issue-dispatch.yml přes workflow_call podle prefixu
+# titulku `create-repo: ` (joby běží v jeho běhu, github kontext
+# i $GITHUB_EVENT_PATH = událost issues volajícího; vlastní trigger issues
+# nemá, label doplňuje dispatcher).
 # Bezpečnost: tělo issue se NIKDY neinterpoluje do run: bloku – parse job ho čte
 # z $GITHUB_EVENT_PATH; execute job dostává už jen hodnoty zvalidované přísnými
 # regexy, a i ty se předávají přes env, ne interpolací do skriptu.
@@ -9,15 +13,13 @@
 name: new-repository
 
 on:
-  issues:
-    types: [opened]
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
   parse:
-    if: contains(github.event.issue.labels.*.name, 'create-repo')
     runs-on: ubuntu-latest
     environment: bot
     outputs:

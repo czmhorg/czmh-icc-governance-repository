@@ -1,0 +1,87 @@
+# GENEROVANO gov-sync.sh -- needitovat v gov repu
+# Workflow issue-dispatch: jediné workflow gov repa na událost issues
+# (defs/defs-governance-repo.md, governance issue). Job route určí operaci
+# z prefixu titulku `<label>: ` (bin/gov-issue-dispatch.sh – titulek se čte
+# z event souboru, nikdy se neinterpoluje do run:), doplní issue label pod
+# botem a cílové workflow se zavolá přes workflow_call – jeho joby běží
+# v tomto běhu (jeden běh na issue, docs/github/actions-reusable-workflows.md).
+# Proč ne label jako klíč: autor s právem read na gov repu ho při založení
+# issue nastavit nemůže – GitHub label bez práva push tiše zahodí
+# (docs/github/issue-create-labels-push-access.md). Podmínka if jobu route
+# vyjmenovává tytéž prefixy jako _GH_GOVERNANCE_ISSUE_KINDS
+# (lib/gh-governance-labels.sh; hlídá tests/test-gh-governance-labels.sh):
+# cizí issue (reconcile-report, diskuse) tak vytvoří jen běh se skipnutým
+# jobem, bez runneru.
+name: issue-dispatch
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  route:
+    if: >-
+      startsWith(github.event.issue.title, 'create-repo: ')
+      || startsWith(github.event.issue.title, 'archive-repo: ')
+      || startsWith(github.event.issue.title, 'unarchive-repo: ')
+      || startsWith(github.event.issue.title, 'move-repo: ')
+      || startsWith(github.event.issue.title, 'rename-repo: ')
+      || startsWith(github.event.issue.title, 'track-delete: ')
+      || startsWith(github.event.issue.title, 'repo-sync: ')
+    runs-on: ubuntu-latest
+    environment: bot
+    outputs:
+      kind: ${{ steps.route.outputs.kind }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Operace z titulku a label issue
+        id: route
+        env:
+          GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+          GH_ENTERPRISE_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
+        run: bash bin/gov-issue-dispatch.sh --route
+
+  new-repository:
+    needs: route
+    if: needs.route.outputs.kind == 'create-repo'
+    uses: ./.github/workflows/new-repository.yml
+    secrets: inherit
+
+  archive-repository:
+    needs: route
+    if: needs.route.outputs.kind == 'archive-repo'
+    uses: ./.github/workflows/archive-repository.yml
+    secrets: inherit
+
+  unarchive-repository:
+    needs: route
+    if: needs.route.outputs.kind == 'unarchive-repo'
+    uses: ./.github/workflows/unarchive-repository.yml
+    secrets: inherit
+
+  move-repository:
+    needs: route
+    if: needs.route.outputs.kind == 'move-repo'
+    uses: ./.github/workflows/move-repository.yml
+    secrets: inherit
+
+  rename-repository:
+    needs: route
+    if: needs.route.outputs.kind == 'rename-repo'
+    uses: ./.github/workflows/rename-repository.yml
+    secrets: inherit
+
+  track-delete:
+    needs: route
+    if: needs.route.outputs.kind == 'track-delete'
+    uses: ./.github/workflows/track-delete.yml
+    secrets: inherit
+
+  repo-sync:
+    needs: route
+    if: needs.route.outputs.kind == 'repo-sync'
+    uses: ./.github/workflows/repo-sync.yml
+    secrets: inherit

@@ -5,18 +5,22 @@
 # (new/archive/unarchive-repository; návrh plan-implementace-governance-poc.md,
 # bod C), move-repository (docs/implementovano/navrh/rozdeleni-projektu.md),
 # rename-repository (docs/implementovano/navrh/gh-rename.md), track-delete
-# a repo-sync (defs/defs-governance-repo.md). Tělo issue = řádky
-# project_key=... a repo_name=... (move-repo navíc new_project_key=...,
-# rename-repo navíc new_repo_name=..., oba volitelný redirect=keep;
-# track-delete: repo_path=... a delete_issue=...; repo-sync: jen
-# project_key=...); titulek je jen pro lidi. Tělo se NIKDY neinterpoluje do
-# run: bloku workflow – čte se výhradně z JSON eventu ($GITHUB_EVENT_PATH)
-# přes jq; hodnoty se validují regexy před prvním použitím; žádný eval/source.
-# Modul běží jen v GitHub Actions (jq je k dispozici; lokální omezení na
-# builtiny se na něj nevztahuje).
+# a repo-sync (defs/defs-governance-repo.md) a route job dispatcheru
+# issue-dispatch (_gh-governance-issue-dispatch-step: operaci určuje prefix
+# titulku `<label>: `, label doplní bot – autor s právem read ho při založení
+# nastavit nemůže, docs/github/issue-create-labels-push-access.md). Tělo
+# issue = řádky project_key=... a repo_name=... (move-repo navíc
+# new_project_key=..., rename-repo navíc new_repo_name=..., oba volitelný
+# redirect=keep; track-delete: repo_path=... a delete_issue=...; repo-sync:
+# jen project_key=...); titulek mimo prefix je jen pro lidi. Tělo ani titulek
+# se NIKDY neinterpolují do run: bloku workflow – čtou se výhradně z JSON
+# eventu ($GITHUB_EVENT_PATH) přes jq; hodnoty se validují regexy před prvním
+# použitím; žádný eval/source. Modul běží jen v GitHub Actions (jq je
+# k dispozici; lokální omezení na builtiny se na něj nevztahuje).
 # Závislosti: gh-common-defs.sh (_GH_CONF, _GH_GHNAME_REGEX, _gh-match,
 # _require_vars), lib/gh-conf.sh (_GH_CONF_LOGIN_REGEX),
-# lib/gh-governance-repo-ops.sh (_gh-governance-repo-name).
+# lib/gh-governance-repo-ops.sh (_gh-governance-repo-name),
+# lib/gh-governance-labels.sh (_GH_GOVERNANCE_ISSUE_KINDS – jen dispatch step).
 [[ -n "${_GH_GOVERNANCE_ISSUE_LOADED:-}" ]] && \
   declare -F _gh-governance-issue-parse >/dev/null && return 0
 _GH_GOVERNANCE_ISSUE_LOADED=1
@@ -594,6 +598,53 @@ _gh-governance-issue-close-rejected() {
   GH_HOST="$GITHUB_ORG_HOSTNAME" gh issue close "$_number" \
     --repo "$GITHUB_ORG/$GH_GOVERNANCE_REPO" \
     --reason "not planned" >/dev/null
+}
+
+_gh-governance-issue-label-ensure() {
+  # Doplní issue label (idempotentní – existující label gh issue edit
+  # --add-label nemění). Selhání je jen varování na stdout a rc 0: směrování
+  # operace na labelu nezávisí, label slouží lidem, filtrům a sweepu
+  # track-delete (defs/defs-governance-repo.md, governance issue).
+  # rc 1 jen při chybějící konfiguraci.
+  # Použití: _gh-governance-issue-label-ensure <issue_number> <label>
+  local _number="$1" _label="$2"
+  _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_GOVERNANCE_REPO || return 1
+  if ! GH_HOST="$GITHUB_ORG_HOSTNAME" gh issue edit "$_number" \
+      --repo "$GITHUB_ORG/$GH_GOVERNANCE_REPO" \
+      --add-label "$_label" >/dev/null; then
+    echo "Varování: label '$_label' u issue #$_number se nepodařilo přidat – filtry a sweep podle labelu issue neuvidí; směrování nezávisí."
+  fi
+  return 0
+}
+
+_gh-governance-issue-dispatch-step() {
+  # Celý route job dispatcheru issue-dispatch (defs/defs-governance-repo.md,
+  # governance issue): z issue eventu ($GITHUB_EVENT_PATH) načte číslo
+  # a titulek, podle prefixu titulku `<label>: ` (label z
+  # _GH_GOVERNANCE_ISSUE_KINDS, lib/gh-governance-labels.sh) určí operaci,
+  # zapíše kind=<label> do $GITHUB_OUTPUT (workflow podle něj volá cílové
+  # workflow přes workflow_call) a doplní issue label. Titulek bez známého
+  # prefixu = kind prázdný, nic se nespouští (rc 0); rc != 0 jen interní
+  # chyba (chybějící event, nevalidní číslo issue, chybějící konfigurace).
+  # Použití: _gh-governance-issue-dispatch-step
+  local _out="${GITHUB_OUTPUT:-/dev/stdout}" _event_path="${GITHUB_EVENT_PATH:?}"
+  local _number _login _body _title _kind="" _k
+  _gh-governance-issue-event-read "$_event_path" _number _login _body || return 1
+  _title=$(jq -r '.issue.title // empty' "$_event_path") || return 1
+  for _k in "${_GH_GOVERNANCE_ISSUE_KINDS[@]}"; do
+    if [[ "$_title" == "$_k: "* ]]; then
+      _kind="$_k"
+      break
+    fi
+  done
+  if [[ -z "$_kind" ]]; then
+    echo "kind=" >> "$_out"
+    echo "Issue #$_number: titulek bez prefixu governance operace – nic se nespouští."
+    return 0
+  fi
+  echo "kind=$_kind" >> "$_out"
+  _gh-governance-issue-label-ensure "$_number" "$_kind" || return 1
+  echo "Issue #$_number: operace $_kind (label doplněn/ověřen)."
 }
 
 _gh-governance-issue-parse-step() {

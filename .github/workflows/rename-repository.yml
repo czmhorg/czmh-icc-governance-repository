@@ -1,8 +1,11 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
-# Workflow rename-repository: issue s labelem rename-repo → přejmenování
+# Workflow rename-repository: governance issue rename-repo → přejmenování
 # spravovaného repa uvnitř projektu (docs/implementovano/navrh/gh-rename.md): rename +
 # efektivní politika pod novým jménem + přesun ukazatele state/ a řádku
-# completion manifestu; topic ghp-* se nemění. Bezpečnostní schéma shodné
+# completion manifestu; topic ghp-* se nemění. Volá ho dispatcher
+# issue-dispatch.yml přes workflow_call podle prefixu titulku `rename-repo: `
+# (joby v jeho běhu, event issues volajícího; vlastní trigger issues nemá).
+# Bezpečnostní schéma shodné
 # s move-repository.yml: parse job čte event soubor (tělo issue se nikdy
 # neinterpoluje do run:), execute dostává zvalidované hodnoty přes env.
 # Concurrency zamyká staré jméno repa (entitu, kterou workflow mění); závod
@@ -10,15 +13,13 @@
 name: rename-repository
 
 on:
-  issues:
-    types: [opened]
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
   parse:
-    if: contains(github.event.issue.labels.*.name, 'rename-repo')
     runs-on: ubuntu-latest
     environment: bot
     outputs:

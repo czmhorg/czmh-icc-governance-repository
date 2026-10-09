@@ -1,6 +1,9 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
-# Workflow move-repository: issue s labelem move-repo → přesun spravovaného
+# Workflow move-repository: governance issue move-repo → přesun spravovaného
 # repa mezi projekty řízeným přejmenováním (docs/implementovano/navrh/rozdeleni-projektu.md).
+# Volá ho dispatcher issue-dispatch.yml přes workflow_call podle prefixu
+# titulku `move-repo: ` (joby v jeho běhu, event issues volajícího; vlastní
+# trigger issues nemá).
 # Bezpečnostní schéma shodné s new-repository.yml: parse job čte event
 # soubor (tělo issue se nikdy neinterpoluje do run:), execute dostává
 # zvalidované hodnoty přes env. Concurrency zamyká staré jméno repa (entitu,
@@ -9,15 +12,13 @@
 name: move-repository
 
 on:
-  issues:
-    types: [opened]
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
   parse:
-    if: contains(github.event.issue.labels.*.name, 'move-repo')
     runs-on: ubuntu-latest
     environment: bot
     outputs:

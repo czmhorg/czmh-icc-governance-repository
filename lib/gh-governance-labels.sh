@@ -2,12 +2,16 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
 # Labely governance issue v gov repu (defs/defs-governance-repo.md): jeden
-# zdroj pravdy pro názvy a popisy labelů, podle nichž workflows vybírají
-# issue (create-repo, …, reconcile-report) a s nimiž klienti issue zakládají
-# (gh issue create --label). Label je součást nasazené verze kódu, ne
-# bootstrapu: nové workflow = nový label, proto labely zakládá gov-sync.sh
-# před pushem kódu, gov-init.sh týmž voláním (deploy je v initu volitelný)
-# a denní reconcile chybějící label hlásí (warning `chybejici label gov repa`).
+# zdroj pravdy pro názvy a popisy labelů (create-repo, …, reconcile-report).
+# Operace issue-ops (_GH_GOVERNANCE_ISSUE_KINDS) směruje dispatcher
+# issue-dispatch podle prefixu titulku `<label>: ` a label issue doplňuje pod
+# botem; klienti label při založení posílají také (gh issue create --label),
+# GitHub ho ale uplatní jen u autora s právem push
+# (docs/github/issue-create-labels-push-access.md). Label je součást nasazené
+# verze kódu, ne bootstrapu: nové workflow = nový label, proto labely zakládá
+# gov-sync.sh před pushem kódu, gov-init.sh týmž voláním (deploy je v initu
+# volitelný) a denní reconcile chybějící label hlásí (warning `chybejici label
+# gov repa`).
 # Závislosti: gh-common-defs.sh (GITHUB_ORG_HOSTNAME); gh label list/create
 # vyžadují write do gov repa.
 [[ -n "${_GH_GOVERNANCE_LABELS_LOADED:-}" ]] && \
@@ -15,6 +19,12 @@
 _GH_GOVERNANCE_LABELS_LOADED=1
 
 _GH_GOVERNANCE_LABEL_ORDER=(create-repo archive-repo unarchive-repo move-repo rename-repo track-delete repo-sync reconcile-report)
+# Operace governance issue = labely issue-ops bez reconcile-report (to zakládá
+# bot sám): prefixy titulku `<label>: `, podle nichž dispatcher issue-dispatch
+# volá cílové workflow (_gh-governance-issue-dispatch-step); podmínka `if`
+# jobu route v issue-dispatch.yml musí vyjmenovat tytéž prefixy
+# (hlídá tests/test-gh-governance-labels.sh).
+_GH_GOVERNANCE_ISSUE_KINDS=(create-repo archive-repo unarchive-repo move-repo rename-repo track-delete repo-sync)
 declare -A _GH_GOVERNANCE_LABELS=(
   [create-repo]="Požadavek na založení repozitáře (workflow new-repository)"
   [archive-repo]="Požadavek na archivaci repozitáře (workflow archive-repository)"
