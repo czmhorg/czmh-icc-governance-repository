@@ -64,7 +64,7 @@ source "$_GOV_ROOT/lib/gh-governance-repo-sync.sh"
 # Lokální běh (mimo Actions, bez GH_CONFD_ROOT — dle _GH_CONFD_SYNC):
 # synchronizuj pracovní klon gov repa a drž jeho zámek po celý běh entry
 # skriptu — operace commitují a pushují state/ do pracovního klonu
-# (docs/implementovano/pracovni-repa-funkci.md). V Actions i s GH_CONFD_ROOT se čte
+# (docs/implementovano/navrh/pracovni-repa-funkci.md). V Actions i s GH_CONFD_ROOT se čte
 # lokální conf.d bez synchronizace.
 if [[ "${_GH_CONFD_SYNC:-0}" == "1" ]]; then
   _gh-confd-sync --hold-lock || exit 1

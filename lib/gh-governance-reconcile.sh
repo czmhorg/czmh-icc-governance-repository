@@ -313,7 +313,7 @@ _gh-governance-track-delete-sweep() {
   }
   while IFS=$'\t' read -r _number _created; do
     [[ -n "$_number" ]] || continue
-    _created_s=$(date -d "$_created" +%s 2>/dev/null) || continue
+    _created_s=$(_gh-iso-epoch "$_created") || continue
     (( _created_s <= _cutoff )) || continue
     _body=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh issue view "$_number" \
       --repo "$GITHUB_ORG/$GH_GOVERNANCE_REPO" --json body --jq .body) || continue

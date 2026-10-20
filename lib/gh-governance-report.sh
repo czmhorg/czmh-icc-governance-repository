@@ -105,11 +105,12 @@ _gh-governance-report-open-issue() {
 }
 
 _gh-governance-report-issue-age-days() {
-  # Vypíše stáří issue v celých dnech od createdAt (ISO 8601 z gh);
-  # rc 1 při neparsovatelném datu (volající issue považuje za mladé).
+  # Vypíše stáří issue v celých dnech od createdAt (ISO 8601 z gh, převod
+  # _gh-iso-epoch); rc 1 při neparsovatelném datu (volající issue považuje
+  # za mladé).
   # Použití: _gh-governance-report-issue-age-days <createdAt>
   local _created_s
-  _created_s=$(date -d "$1" +%s 2>/dev/null) || return 1
+  _created_s=$(_gh-iso-epoch "$1") || return 1
   echo $(( ( $(date +%s) - _created_s ) / 86400 ))
 }
 

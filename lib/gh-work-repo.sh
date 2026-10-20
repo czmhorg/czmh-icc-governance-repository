@@ -1,17 +1,19 @@
 #!/bin/bash
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
-# Pracovní repa funkcí (docs/implementovano/pracovni-repa-funkci.md): trvalé klony
+# Pracovní repa funkcí (docs/implementovano/navrh/pracovni-repa-funkci.md): trvalé klony
 # v ${GH_WORK_REPOS_ROOT}, se kterými pracují výhradně funkce (pracovní klon
 # gov repa, pracovní klony řídicích rep migrace). Modul poskytuje zámek per
 # pracovní repo, layout cest pod kořenem a sync (clone / fetch + ff) bez
 # uložení tokenu do .git/config.
 # Automaticky se dokončuje jen vlastní nedokončená operace: push vlastních
 # commitů, které jsou po čerstvém fetchi čistým předstihem nad origin, úklid
-# vlastního .git/index.lock (pod zámkem repa) a smazání částečného klonu
-# <dir>.partial. Necommitnuté změny (vlastní nedokončená transakce) se
-# zahazují s hláškou. Cizí obsah (divergence, cizí origin, ne-git adresář) se nikdy nemaže ani
-# nepřepisuje — _gh-work-repo-error vypíše akční hlášku pro ruční zásah.
+# vlastního .git/index.lock (pod zámkem repa), smazání částečného klonu
+# <dir>.partial a opakování přejmenování hotového klonu <dir>.partial → <dir>
+# při přechodném zámku adresáře (Windows, antivir). Necommitnuté změny
+# (vlastní nedokončená transakce) se zahazují s hláškou. Cizí obsah
+# (divergence, cizí origin, ne-git adresář) se nikdy nemaže ani nepřepisuje —
+# _gh-work-repo-error vypíše akční hlášku pro ruční zásah.
 # Pořadí práce s pracovním repem: zámek → sync → práce → uvolnění zámku.
 # Klony mají repo-lokální core.autocrlf=false (nastavuje clone i update) —
 # validace nad obsahem (hlavičky TSV, sha256 fingerprinty) jsou bajtově přesné
@@ -24,6 +26,13 @@ _GH_WORK_REPO_LOADED=1
 
 # Timeout čekání na obsazený zámek v sekundách (testy hodnotu snižují).
 : "${_GH_WORK_LOCK_TIMEOUT_S:=30}"
+
+# Opakování přejmenování hotového klonu <dir>.partial → <dir>: Windows odmítne
+# přejmenovat adresář, v němž má jiný proces otevřený soubor (antivir skenuje
+# čerstvě zapsané soubory po clone) — zámek je přechodný. Počet pokusů a pauza
+# v sekundách (testy hodnoty snižují).
+: "${_GH_WORK_RENAME_ATTEMPTS:=10}"
+: "${_GH_WORK_RENAME_PAUSE_S:=1}"
 
 # SHA HEAD pracovního repa po posledním úspěšném _gh-work-repo-sync, je-li
 # známé bez dalšího git procesu (shoda s origin, ff-merge, push vlastních
@@ -119,11 +128,17 @@ _gh-work-repo-clean-cmd() {
 _gh-work-repo-error() {
   # Akční hláška po selhání git operace v pracovním repu; opravu (typicky
   # delete + reclone přes tools/clean-work-repos.sh) provádí vždy člověk.
+  # Volitelná <rada> nahradí generickou radu (git status + clean-work-repos)
+  # tam, kde nesedí — např. po selhání přesunu klonu, kdy klon neexistuje.
   # Vrací 1, aby šla použít přímo v návratové cestě volajícího.
-  # Použití: _gh-work-repo-error <repo_dir> <operace> <detail/výstup gitu>
-  local _cmd
+  # Použití: _gh-work-repo-error <repo_dir> <operace> <detail/výstup gitu> [<rada>]
+  local _cmd _hint="${4:-}"
   echo "Chyba: Git operace '$2' v pracovním repu '$1' selhala." >&2
   [[ -n "$3" ]] && printf '%s\n' "$3" >&2
+  if [[ -n "$_hint" ]]; then
+    printf '%s\n' "$_hint" >&2
+    return 1
+  fi
   _cmd=$(_gh-work-repo-clean-cmd "$1")
   if [[ -n "$_cmd" ]]; then
     echo "Zkontroluj 'git -C \"$1\" status'. Pokud v klonu není nic, co má platit, smaž ho: $_cmd --apply (rozpracovaný klon smaže jen $_cmd --force --apply) — příští běh si ho naclonuje znovu." >&2
@@ -165,6 +180,27 @@ _gh-work-repo-push() {
   return 1
 }
 
+_gh-work-repo-rename() {
+  # Přejmenuje adresář s opakováním: Windows odmítne přejmenovat adresář,
+  # v němž má jiný proces otevřený soubor (antivir/indexer těsně po git clone)
+  # — mv hlásí „Permission denied“ a za chvíli projde
+  # (docs/bash/windows-mv-adresare-permission-denied.md). Opakuje na jakýkoli
+  # rc ≠ 0 (hláška mv je lokalizovaná, neparsuje se), až
+  # _GH_WORK_RENAME_ATTEMPTS pokusů po _GH_WORK_RENAME_PAUSE_S s; první
+  # selhání ohlásí jedním řádkem na stderr. Po vyčerpání pokusů vrací 1
+  # a výstup posledního mv na stdout (volající ho zachytí). Na Linuxu/macOS
+  # projde první pokus.
+  # Použití: _gh-work-repo-rename <src> <dst>
+  local _i _err
+  for (( _i = 1; _i <= _GH_WORK_RENAME_ATTEMPTS; _i++ )); do
+    _err=$(mv "$1" "$2" 2>&1) && return 0
+    [[ $_i -eq 1 ]] && echo "Přejmenování '$1' na '$2' selhalo (${_err##*: }) — adresář zřejmě přechodně drží jiný proces (antivir); opakuji až ${_GH_WORK_RENAME_ATTEMPTS}× po ${_GH_WORK_RENAME_PAUSE_S} s..." >&2
+    (( _i < _GH_WORK_RENAME_ATTEMPTS )) && sleep "$_GH_WORK_RENAME_PAUSE_S"
+  done
+  printf '%s\n' "$_err"
+  return 1
+}
+
 _gh-work-repo-clone-auth() {
   # Klon s tokenizovanou URL: init + remote origin = <plain_url> + fetch
   # tokenizovanou URL pouze jako argumentem (token nezůstává v .git/config)
@@ -180,12 +216,16 @@ _gh-work-repo-clone-auth() {
 _gh-work-repo-clone() {
   # První naklonování pracovního repa do <repo_dir>.partial a po úspěchu
   # přesun na <repo_dir> — existence adresáře repa tak vždy znamená úplný
-  # klon (částečný klon po zabitém procesu uklidí sync). Bez <auth_url> plain
-  # clone (credential helper), s <auth_url> _gh-work-repo-clone-auth.
-  # Nedokončený klon se maže — nejde o uživatelská data.
+  # klon (částečný klon po zabitém procesu uklidí sync). Přesun opakuje
+  # _gh-work-repo-rename (přechodný zámek adresáře na Windows); po jeho
+  # selhání hláška radí spustit funkci znovu, ne clean-work-repos (klon
+  # neexistuje). Bez <auth_url> plain clone (credential helper), s <auth_url>
+  # _gh-work-repo-clone-auth. Nedokončený klon se maže — nejde o uživatelská
+  # data (na Windows může i rm selhat na tomtéž zámku; zbytek uklidí příští
+  # sync).
   # Použití: _gh-work-repo-clone <repo_dir> <plain_url> [<branch> <auth_url>]
   local _dir="$1" _url="$2" _branch="${3:-}" _auth_url="${4:-}" _tmp="$1.partial"
-  local _out _op _rc
+  local _out _op _rc _hint=""
   rm -rf "$_tmp"
   if [[ -z "$_auth_url" ]]; then
     _op="clone"
@@ -195,11 +235,19 @@ _gh-work-repo-clone() {
     _out=$(_gh-work-repo-clone-auth "$_tmp" "$_url" "$_branch" "$_auth_url"); _rc=$?
   fi
   if [[ $_rc -eq 0 ]]; then
-    _out=$(mv "$_tmp" "$_dir" 2>&1) && return 0
+    _out=$(_gh-work-repo-rename "$_tmp" "$_dir") && return 0
     _op="přesun klonu"
   fi
   rm -rf "$_tmp"
-  _gh-work-repo-error "$_dir" "$_op" "$(_gh-work-repo-mask-auth "$_out" "$_auth_url")"
+  if [[ "$_op" == "přesun klonu" ]]; then
+    _hint="Pokud selhání trvá, zjisti, který proces adresář drží (antivir/indexer; git fsmonitor: 'git config --show-origin --get core.fsmonitor')."
+    if [[ -e "$_tmp" ]]; then
+      _hint="Nedokončený klon '$_tmp' se nepodařilo ani smazat (drží ho jiný proces) — příští běh ho uklidí a klon zopakuje; spusť funkci znovu. $_hint"
+    else
+      _hint="Zámek adresáře bývá přechodný — spusť funkci znovu (nedokončený klon '$_tmp' byl smazán, v '$_dir' nic není). $_hint"
+    fi
+  fi
+  _gh-work-repo-error "$_dir" "$_op" "$(_gh-work-repo-mask-auth "$_out" "$_auth_url")" "$_hint"
 }
 
 _gh-work-repo-check-origin() {

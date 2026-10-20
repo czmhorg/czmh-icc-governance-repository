@@ -135,10 +135,17 @@ _GH_BRANCH_NAME_REGEX='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 # = všechny události). Platnost názvu události ověřuje až GitHub API.
 _GH_WEBHOOK_URL_REGEX='^https?://[^[:space:]]+$'
 _GH_WEBHOOK_EVENT_REGEX='^[a-z_]+$'
+# Mapování workspace (GH_WORKSPACE_MAP, docs/implementovano/navrh/workspace-mapovani.md): vzor
+# ghName v klíči položky = znaky ghName plus glob znaky * a ? (rozsahy [...],
+# extglob a '**' se nepouštějí); hodnota = relativní cesta ze segmentů
+# [A-Za-z0-9._-] (bez úvodního/koncového '/', '//', '\' a mezer).
+_GH_WS_PATTERN_REGEX='^[a-z0-9._*?-]+$'
+_GH_WS_VALUE_REGEX='^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$'
 
 # Kořenový adresář lokálních kopií repozitářů (workspace). Workspace funkce
 # (gh-clone, gh-cd, gh-open, gh-project-clone, gh-sync, gh-status) pracují
-# se strukturou ${GH_WORKSPACE_ROOT}/{projectKey}/{ghName}. Výchozí hodnota
+# se strukturou ${GH_WORKSPACE_ROOT}/{projectKey}/{ghName}; jiné umístění
+# vybraných rep určuje mapování GH_WORKSPACE_MAP (níže). Výchozí hodnota
 # platí bez jakékoli lokální konfigurace; přepsání v gh-common-defs.local.sh.
 # Koncové lomítko hodnoty se po načtení lokální konfigurace ořeže (cesty se
 # skládají jako ${GH_WORKSPACE_ROOT}/…, jinak by vznikalo dvojité lomítko).
@@ -191,6 +198,46 @@ _GH_WEBHOOK_EVENT_REGEX='^[a-z_]+$'
 # odstup dvou stejných hlášení v jednom shellu. 0 = hlášení vypnuto.
 : "${GH_PR_NOTICE_TTL_MIN:=10}"
 
+# Hlídač PR na macOS (tools/pr-watcher.sh; docs/navrh/pr-watcher-macos.md):
+# LaunchAgent à 1 minutu, bubliny přes vlastní notifikátor — aplikaci
+# kompilovanou při instalaci z tools/pr-watcher-notifier.swift. Jen macOS;
+# windowsí hlídač tools/pr-watcher.ps1 má vlastní konfiguraci (.local.ps1).
+# Opakovaná připomínka v minutách, dokud dotaz vrací PR; 0 = bublina jen při
+# novém PR / schválení.
+: "${GH_PR_WATCHER_REMINDER_MIN:=60}"
+
+# Stav hlídače, generované soubory kliknutí (pr-review.command, on-click.sh)
+# a log LaunchAgentu.
+# Nezapomeň: používej ${HOME}/..., ne ~/... (tilda se neexpanduje ve všech kontextech).
+: "${GH_PR_WATCHER_STATE_DIR:=${HOME}/.local/state/gh-pr-watcher}"
+
+# Aplikace notifikátoru. Musí ležet pod ${HOME}/Applications — z jiného
+# umístění macOS oprávnění k oznámením odmítne
+# (docs/mac/usernotifications-lokalni-aplikace.md).
+: "${GH_PR_WATCHER_APP:=${HOME}/Applications/gh-pr-watcher.app}"
+
+# Příkaz, kterým hlídač zobrazí jednu bublinu (shellový řetězec pro eval,
+# vyhodnocuje se až při volání). Dostává exportované proměnné
+# GH_PR_WATCHER_ID (identifikátor bubliny — stejný nahradí předchozí bublinu
+# téhož druhu), GH_PR_WATCHER_TITLE, GH_PR_WATCHER_BODY, GH_PR_WATCHER_CLICK
+# (shell příkaz pro kliknutí na tělo / tlačítko Terminál) a GH_PR_WATCHER_URL
+# (tlačítko GitHub). Jiný notifikátor se stejným rozhraním lze dosadit
+# v .local.sh. Výstup aplikace (potvrzení doručení, nebo chyba oprávnění) jde
+# do notifier.log ve stavovém adresáři — open se vrací hned a návratový kód
+# aplikace nevidí. Jednoduché uvozovky záměrně: proměnné se expandují až při
+# eval, proto ne přes : "${VAR:=…}".
+if [[ -z "${GH_PR_WATCHER_NOTIFIER:-}" ]]; then
+  GH_PR_WATCHER_NOTIFIER='open -g -n "$GH_PR_WATCHER_APP" --stdout "$GH_PR_WATCHER_STATE_DIR/notifier.log" --stderr "$GH_PR_WATCHER_STATE_DIR/notifier.log" --args --id "$GH_PR_WATCHER_ID" --title "$GH_PR_WATCHER_TITLE" --body "$GH_PR_WATCHER_BODY" --click "$GH_PR_WATCHER_CLICK" --url "$GH_PR_WATCHER_URL"'
+fi
+
+# Co provede kliknutí na tělo bubliny nebo tlačítko Terminál (zapisuje se při
+# instalaci do on-click.sh). Prázdné = výchozí
+# open "${GH_PR_WATCHER_STATE_DIR}/pr-review.command" (Terminal.app spustí
+# gh-pr-list + gh-pr-review v interaktivním Bashi 5); výchozí se neskládá
+# zde, aby respektovalo GH_PR_WATCHER_STATE_DIR přepsaný v .local.sh.
+# iTerm2: open -a iTerm "<cesta k pr-review.command>".
+: "${GH_PR_WATCHER_CLICK_CMD:=}"
+
 # Kořen lokálního zrcadla pro vyhledávání v kódu projektů (gh-functions-search.sh).
 # Struktura: ${GH_SEARCH_MIRROR_DIR}/{projectKey}/{active|archived}/{ghRepoName}.git
 # Obsah je dopočitatelná cache (bare + shallow klony výchozích větví) — lze
@@ -213,7 +260,7 @@ _GH_WEBHOOK_EVENT_REGEX='^[a-z_]+$'
 # respektuje jako vypnuto, := by ji přepsalo defaultem.
 : "${GH_SEARCH_PAGER=${PAGER:-less -RFX}}"
 
-# Kořen pracovních rep funkcí (docs/implementovano/pracovni-repa-funkci.md): trvalé
+# Kořen pracovních rep funkcí (docs/implementovano/navrh/pracovni-repa-funkci.md): trvalé
 # klony (gov repo, řídicí repa migrace), se kterými pracují výhradně funkce.
 # Není to cache — obsah se commituje a pushuje; nesmí ho mazat čisticí nástroje.
 # Nezapomeň: používej ${HOME}/..., ne ~/... (tilda se neexpanduje ve všech kontextech).
@@ -265,14 +312,27 @@ _gh-branch-name-valid() {
 # a přepiš proměnné, jejichž výchozí hodnota nevyhovuje (GH_WORKSPACE_ROOT,
 # GH_EDITOR, …).
 # ══════════════════════════════════════════════════════════════════════════════
+# Mapování nestandardního umístění rep ve workspace (docs/implementovano/navrh/workspace-mapovani.md).
+# Jen gh-common-defs.local.sh (pole nejde předat prostředím), zápis po položkách:
+#   GH_WORKSPACE_MAP[<projectKey>/<vzor ghName>]=<adresář relativně ke GH_WORKSPACE_ROOT>
+# Vzor = přesné ghName nebo glob jen z * a ?; repo pak leží
+# v ${GH_WORKSPACE_ROOT}/<hodnota>/<ghName> (listový adresář vždy celé ghName).
+# Nejdelší shodný vzor vítězí, dva různé vzory stejné délky jsou chyba; položka
+# <projectKey>/* určuje i projektový adresář (gh-cd/gh-open <projectKey>). Bez
+# položek se nic nemění. Validace běží líně při prvním použití
+# (_gh-workspace-map-prepare), start shellu zůstává bez práce navíc. Pole musí
+# být předdeklarované, jinak by zápis položky v .local.sh skončil syntax error.
+declare -gA GH_WORKSPACE_MAP=()
 _GH_COMMON_DIR="$(dirname "${BASH_SOURCE[0]}")"
 _GH_COMMON_LOCAL="$_GH_COMMON_DIR/gh-common-defs.local.sh"
 [[ -f "$_GH_COMMON_LOCAL" ]] && source "$_GH_COMMON_LOCAL"
 unset _GH_COMMON_LOCAL
 # Jediné místo normalizace tvaru kořene workspace (env i .local.sh).
 GH_WORKSPACE_ROOT="${GH_WORKSPACE_ROOT%/}"
+# Odvozené struktury mapování se staví líně; nový source = nová validace.
+_GH_WS_MAP_READY=0
 
-# Zámek a sync pracovních rep funkcí (docs/implementovano/pracovni-repa-funkci.md).
+# Zámek a sync pracovních rep funkcí (docs/implementovano/navrh/pracovni-repa-funkci.md).
 if ! source "$_GH_COMMON_DIR/lib/gh-work-repo.sh"; then
   echo "Chyba: Nepodařilo se načíst lib/gh-work-repo.sh." >&2
 fi
@@ -284,7 +344,7 @@ fi
 # parserem lib/gh-conf.sh – žádné sourcování konfiguračních souborů.
 # Formát: docs/readme/README_COMMON.md.
 # ══════════════════════════════════════════════════════════════════════════════
-# Zdroj conf.d (docs/implementovano/pracovni-repa-funkci.md):
+# Zdroj conf.d (docs/implementovano/navrh/pracovni-repa-funkci.md):
 # 1. GH_CONFD_ROOT (env nebo .local.sh) — vývojářský override „čti odsud
 #    a nesynchronizuj" (pískoviště pro nepushnuté změny konfigurace),
 # 2. GitHub Actions (checkout gov repa na runneru) — conf.d vedle tohoto
@@ -485,35 +545,262 @@ _bb-require-gh-token() {
   fi
 }
 
-_gh-workspace-dir() {
-  # Vrátí absolutní cestu k workspace adresáři pro daný projectKey (a volitelně repoName).
-  # Použití: _gh-workspace-dir <projectKey> [repoName]
-  # Selže s chybou pokud GH_WORKSPACE_ROOT není nastavena.
+_gh-workspace-map-error() {
+  # Chyba položky mapování workspace jmenující položku; vrací 1.
+  # Použití: _gh-workspace-map-error <klíč> <hodnota> <důvod>
+  echo "Chyba: GH_WORKSPACE_MAP[$1]='$2': $3 (gh-common-defs.local.sh)." >&2
+  return 1
+}
+
+_gh-workspace-map-check-entry() {
+  # Validace jedné položky mapování (docs/implementovano/navrh/workspace-mapovani.md,
+  # Omezení): klíč <projectKey>/<vzor ghName> s jediným '/', vzor podle
+  # _GH_WS_PATTERN_REGEX bez '**', hodnota podle _GH_WS_VALUE_REGEX bez
+  # segmentů '.' a '..'. Každá chyba jmenuje položku.
+  # Použití: _gh-workspace-map-check-entry <klíč> <hodnota>
+  local _key="$1" _val="$2" _pk _pat
+  if [[ "$_key" != */* ]]; then
+    _gh-workspace-map-error "$_key" "$_val" "klíč musí mít tvar <projectKey>/<vzor ghName>"; return 1
+  fi
+  _pk="${_key%%/*}"; _pat="${_key#*/}"
+  if [[ "$_pat" == */* ]]; then
+    _gh-workspace-map-error "$_key" "$_val" "klíč smí obsahovat jediné '/' (<projectKey>/<vzor ghName>)"; return 1
+  fi
+  if ! _gh-match "$_pk" "$_GH_PROJECT_KEY_REGEX"; then
+    _gh-workspace-map-error "$_key" "$_val" "projectKey '$_pk' neodpovídá formátu $_GH_PROJECT_KEY_REGEX"; return 1
+  fi
+  if ! _gh-match "$_pat" "$_GH_WS_PATTERN_REGEX" || [[ "$_pat" == *'**'* ]]; then
+    _gh-workspace-map-error "$_key" "$_val" "vzor '$_pat' smí obsahovat jen malá písmena, číslice, . _ - a glob znaky * ? (ne **)"; return 1
+  fi
+  if ! _gh-match "$_val" "$_GH_WS_VALUE_REGEX"; then
+    _gh-workspace-map-error "$_key" "$_val" "hodnota musí být relativní cesta ze segmentů [A-Za-z0-9._-] oddělených '/' (bez úvodního a koncového '/', '//', '\\' a mezer)"; return 1
+  fi
+  if [[ "/$_val/" == *"/../"* || "/$_val/" == *"/./"* ]]; then
+    _gh-workspace-map-error "$_key" "$_val" "hodnota nesmí obsahovat segmenty '.' a '..'"; return 1
+  fi
+  return 0
+}
+
+_gh-workspace-containers-insert() {
+  # Vloží cestu do seřazeného pole _GH_WS_CONTAINERS (insertion sort jen
+  # builtiny; řazení v C locale, aby byl výčet gh-sync/gh-status deterministický).
+  # Použití: _gh-workspace-containers-insert <abs cesta>
+  local LC_ALL=C
+  local _new="$1" _i=${#_GH_WS_CONTAINERS[@]}
+  while (( _i > 0 )) && [[ "${_GH_WS_CONTAINERS[_i-1]}" > "$_new" ]]; do
+    _GH_WS_CONTAINERS[_i]="${_GH_WS_CONTAINERS[_i-1]}"
+    (( _i-- ))
+  done
+  _GH_WS_CONTAINERS[_i]="$_new"
+}
+
+_gh-workspace-map-prepare() {
+  # Jednorázová (per shell a kořen workspace) validace GH_WORKSPACE_MAP
+  # a stavba odvozených struktur: _GH_WS_CONTAINER[<abs cesta>]=<projectKey …>
+  # (kontejner = ${GH_WORKSPACE_ROOT}/<hodnota>; mezerou oddělené projekty,
+  # které do něj míří — jednu složku smí sdílet víc projektů, např. všechna
+  # CI/CD repa; ghName se v ní pak nesmí opakovat), _GH_WS_SKIP[<abs cesta>]=<klíč>
+  # (kontejnery a všichni jejich předci pod kořenem — výčet je nevypisuje jako
+  # repa, cesta repa se s nimi nesmí krýt), _GH_WS_CONTAINERS (kontejnery
+  # seřazené). Při chybě zůstane _GH_WS_MAP_READY=0 a chyba se opakuje při
+  # každém použití, dokud ji uživatel neopraví.
+  # Použití: _gh-workspace-map-prepare || return 1
+  [[ "${_GH_WS_MAP_READY:-0}" -eq 1 && "${_GH_WS_MAP_ROOT:-}" == "$GH_WORKSPACE_ROOT" ]] && return 0
   _require_vars GH_WORKSPACE_ROOT || return 1
-  local _path="${GH_WORKSPACE_ROOT}/$1"
-  [[ -n "$2" ]] && _path="${_path}/$2"
+  local _key _val _dir _pk
+  declare -gA _GH_WS_CONTAINER=() _GH_WS_SKIP=()
+  declare -ga _GH_WS_CONTAINERS=()
+  for _key in "${!GH_WORKSPACE_MAP[@]}"; do
+    _val="${GH_WORKSPACE_MAP[$_key]}"
+    _gh-workspace-map-check-entry "$_key" "$_val" || return 1
+    _pk="${_key%%/*}"
+    _dir="${GH_WORKSPACE_ROOT}/${_val}"
+    if [[ -z "${_GH_WS_CONTAINER[$_dir]:-}" ]]; then
+      _GH_WS_CONTAINER[$_dir]="$_pk"
+      _gh-workspace-containers-insert "$_dir"
+    elif [[ " ${_GH_WS_CONTAINER[$_dir]} " != *" $_pk "* ]]; then
+      _GH_WS_CONTAINER[$_dir]+=" $_pk"
+    fi
+    while [[ "$_dir" != "$GH_WORKSPACE_ROOT" ]]; do
+      [[ -n "${_GH_WS_SKIP[$_dir]:-}" ]] || _GH_WS_SKIP[$_dir]="$_key"
+      _dir="${_dir%/*}"
+    done
+  done
+  _GH_WS_MAP_ROOT="$GH_WORKSPACE_ROOT"
+  _GH_WS_MAP_READY=1
+  return 0
+}
+
+_gh-workspace-map-resolve() {
+  # Najde kontejner (hodnotu položky) pro repo <projectKey>/<ghName>: ze
+  # shodných vzorů projektu vítězí nejdelší (přesné jméno > pay-* > *); dvě
+  # různé shody stejné délky = chyba jmenující obě položky. Nameref dostane
+  # hodnotu položky, bez shody prázdno. Glob porovnání [[ == $vzor ]] —
+  # vzor je validovaný jen na * a ? (bez rozsahů, locale nehraje roli).
+  # Použití: local _c; _gh-workspace-map-resolve <projectKey> <ghName> _c || return 1
+  local _pk="$1" _name="$2" _key _pat _best="" _best_key="" _tie=""
+  declare -n _gwmr_ref="$3"
+  _gwmr_ref=""
+  for _key in "${!GH_WORKSPACE_MAP[@]}"; do
+    [[ "${_key%%/*}" == "$_pk" ]] || continue
+    _pat="${_key#*/}"
+    [[ "$_name" == $_pat ]] || continue
+    if [[ -z "$_best_key" || ${#_pat} -gt ${#_best} ]]; then
+      _best="$_pat"; _best_key="$_key"; _tie=""
+    elif [[ ${#_pat} -eq ${#_best} ]]; then
+      _tie="$_key"
+    fi
+  done
+  if [[ -n "$_tie" ]]; then
+    echo "Chyba: ghName '$_name' projektu '$_pk' odpovídá dvěma vzorům stejné délky: GH_WORKSPACE_MAP[$_best_key] a GH_WORKSPACE_MAP[$_tie] (gh-common-defs.local.sh)." >&2
+    return 1
+  fi
+  [[ -n "$_best_key" ]] && _gwmr_ref="${GH_WORKSPACE_MAP[$_best_key]}"
+  return 0
+}
+
+_gh-workspace-path() {
+  # Naplní nameref absolutní cestou workspace adresáře projektu (prázdné
+  # ghName) nebo repa. Standardně ${GH_WORKSPACE_ROOT}/<projectKey>[/<ghName>];
+  # s položkou mapování ${GH_WORKSPACE_ROOT}/<hodnota>/<ghName>, projektový
+  # adresář podle položky <projectKey>/*. Jediné místo skládání workspace cest
+  # — bez forku, vhodné do smyček (gh-project-clone); _gh-workspace-dir je
+  # echo obal pro $(…). Cesta repa krytá s kontejnerem mapování nebo jeho
+  # předkem je chyba (gh-delete by jinak smazal kontejner i s repy).
+  # Použití: local _p; _gh-workspace-path <projectKey> <ghName|""> _p || return 1
+  # Selže s chybou pokud GH_WORKSPACE_ROOT není nastavena nebo mapování neprojde.
+  local _key="$1" _name="$2" _container=""
+  declare -n _gwp_ref="$3"
+  _gh-workspace-map-prepare || return 1
+  if [[ -n "$_name" ]]; then
+    _gh-workspace-map-resolve "$_key" "$_name" _container || return 1
+  else
+    _container="${GH_WORKSPACE_MAP[$_key/*]:-}"
+  fi
+  _gwp_ref="${GH_WORKSPACE_ROOT}/${_container:-$_key}"
+  [[ -n "$_name" ]] && _gwp_ref+="/${_name}"
+  if [[ -n "$_name" && -n "${_GH_WS_SKIP[$_gwp_ref]:-}" ]]; then
+    echo "Chyba: Cesta repa '$_gwp_ref' se kryje s adresářem položky GH_WORKSPACE_MAP[${_GH_WS_SKIP[$_gwp_ref]}] (gh-common-defs.local.sh)." >&2
+    _gwp_ref=""
+    return 1
+  fi
+  return 0
+}
+
+_gh-workspace-dir() {
+  # Vypíše absolutní cestu k workspace adresáři pro daný projectKey (a volitelně ghName).
+  # Použití: _gh-workspace-dir <projectKey> [ghName]
+  # Selže s chybou pokud GH_WORKSPACE_ROOT není nastavena.
+  local _path
+  _gh-workspace-path "$1" "${2:-}" _path || return 1
   echo "$_path"
 }
 
+_gh-git-origin-url() {
+  # Naplní nameref URL remote origin klonu bez spuštění gitu: čte sekci
+  # [remote "origin"] v <dir>/.git/config builtiny (výčet stovek rep ve
+  # workspace bez forku na repo); .git jiného tvaru (soubor gitdir u worktree
+  # či submodulu) → git remote get-url. Bez originu nebo mimo git repo
+  # prázdno; vždy rc 0.
+  # Použití: local _u; _gh-git-origin-url <dir> _u
+  local _dir="$1" _line _in=0
+  declare -n _ggou_ref="$2"
+  _ggou_ref=""
+  if [[ -f "$_dir/.git/config" ]]; then
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+      _line="${_line%$'\r'}"
+      case "$_line" in
+        '[remote "origin"]') _in=1 ;;
+        '['*) _in=0 ;;
+        *) if (( _in )) && [[ "$_line" =~ ^[[:space:]]*url[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+             _ggou_ref="${BASH_REMATCH[1]}"
+             return 0
+           fi ;;
+      esac
+    done < "$_dir/.git/config"
+    return 0
+  fi
+  [[ -e "$_dir/.git" ]] || return 0
+  _ggou_ref=$(git -C "$_dir" remote get-url origin 2>/dev/null)
+  return 0
+}
+
+_gh-workspace-dir-children() {
+  # Přidá do nameref pole repa (podadresáře) jednoho rodiče pro výčet
+  # workspace. Dítě rovné kontejneru mapování nebo jeho předkovi
+  # (_GH_WS_SKIP) se vynechá (kontejner s .git = varování, kryje se s repem).
+  # S projectKey jde do výčtu jen repo tohoto projektu podle remote origin
+  # (_gh-repo-resolve-exact) — položky mapování určují jen umístění, ne
+  # příslušnost; repo jiného projektu, klon z Bitbucketu s nepřepnutým
+  # origin i klon bez origin se přeskočí a jejich počet za rodiče jde na
+  # stderr. Adresář bez .git zůstává (volající ho ohlásí). Glob bez
+  # nullglob: guard [[ -d ]].
+  # Použití: _gh-workspace-dir-children <rodič> <projectKey|""> <jméno pole>
+  local _parent="$1" _key="$2" _d _url _foreign=0
+  declare -n _gwdc_ref="$3"
+  local -A _rr=()
+  for _d in "$_parent"/*/; do
+    _d="${_d%/}"
+    [[ -d "$_d" ]] || continue
+    if [[ -n "${_GH_WS_SKIP[$_d]:-}" ]]; then
+      [[ -d "$_d/.git" ]] && echo "Varování: Adresář položky GH_WORKSPACE_MAP[${_GH_WS_SKIP[$_d]}] '$_d' je git repozitář – kryje se s repem (gh-common-defs.local.sh)." >&2
+      continue
+    fi
+    if [[ -n "$_key" && -e "$_d/.git" ]]; then
+      _gh-git-origin-url "$_d" _url
+      _rr=()
+      if ! _gh-repo-resolve-exact _rr "$_url" 2>/dev/null || [[ "${_rr[projectKey]}" != "$_key" ]]; then
+        (( _foreign++ ))
+        continue
+      fi
+    fi
+    _gwdc_ref+=("$_d")
+  done
+  (( _foreign > 0 )) && echo "Přeskočeno (repa jiných projektů ve složce ${_parent#"$GH_WORKSPACE_ROOT"/}): $_foreign" >&2
+  return 0
+}
+
 _gh-workspace-dirs() {
-  # Naplní nameref pole cestami workspace adresářů odpovídajících projectKey (a volitelně repoName).
-  # Použití: local -a _dirs=(); _gh-workspace-dirs <projectKey> <repoName> _dirs || return 1
-  # Selže s chybou pokud GH_WORKSPACE_ROOT není nastavena.
-  _require_vars GH_WORKSPACE_ROOT || return 1
+  # Naplní nameref pole cestami workspace adresářů (kandidátů na repa) pro
+  # gh-sync a gh-status: s projectKey+ghName jediná cesta repa; s projectKey
+  # děti projektového adresáře a kontejnerů položek mapování daného projektu
+  # (sdílený kontejner patří každému projektu, který do něj míří), z nich jen
+  # repa tohoto projektu podle origin (_gh-workspace-dir-children); bez
+  # argumentů děti všech adresářů pod kořenem a všech kontejnerů bez filtru.
+  # Princip „rodiče → děti“: rodiče se deduplikují a dítě rovné kontejneru
+  # mapování nebo jeho předkovi (_GH_WS_SKIP) se vynechá — každé repo je ve
+  # výčtu právě jednou a kontejnery se nehlásí jako „není git repozitář“.
+  # Bez položek = dvouúrovňový výčet ${GH_WORKSPACE_ROOT}/*/*/ jako dřív.
+  # Použití: local -a _dirs=(); _gh-workspace-dirs <projectKey> <ghName> _dirs || return 1
+  # Selže s chybou pokud GH_WORKSPACE_ROOT není nastavena nebo mapování neprojde.
   local _key="$1" _repo="$2"
   declare -n _dirs_ref="$3"
-  local _d
+  local _p _d _c
+  local -a _parents=()
+  local -A _seen=()
+  _gh-workspace-map-prepare || return 1
   if [[ -n "$_repo" ]]; then
-    _dirs_ref+=("${GH_WORKSPACE_ROOT}/${_key}/${_repo}")
-  elif [[ -n "$_key" ]]; then
-    for _d in "${GH_WORKSPACE_ROOT}/${_key}"/*/; do
-      [[ -d "$_d" ]] && _dirs_ref+=("$_d")
+    _gh-workspace-path "$_key" "$_repo" _p || return 1
+    _dirs_ref+=("$_p")
+    return 0
+  fi
+  if [[ -n "$_key" ]]; then
+    _gh-workspace-path "$_key" "" _p || return 1
+    _parents+=("$_p")
+    for _c in "${_GH_WS_CONTAINERS[@]}"; do
+      [[ " ${_GH_WS_CONTAINER[$_c]} " == *" $_key "* ]] && _parents+=("$_c")
     done
   else
-    for _d in "${GH_WORKSPACE_ROOT}"/*/*/; do
-      [[ -d "$_d" ]] && _dirs_ref+=("$_d")
+    for _d in "${GH_WORKSPACE_ROOT}"/*/; do
+      [[ -d "$_d" ]] && _parents+=("${_d%/}")
     done
+    _parents+=("${_GH_WS_CONTAINERS[@]}")
   fi
+  for _p in "${_parents[@]}"; do
+    [[ -n "${_seen[$_p]:-}" ]] && continue
+    _seen[$_p]=1
+    _gh-workspace-dir-children "$_p" "$_key" "$3"
+  done
   return 0
 }
 
@@ -741,6 +1028,53 @@ _gh-summary-row() {
   local _label="$1" _value="$2" _width="${3:-30}" _indent="${4:-2}" _padded
   _gh-utf8-pad "$_label" "$_width" _padded
   printf '%*s%s %s\n' "$_indent" '' "$_padded" "$_value"
+}
+
+_gh-iso-epoch() {
+  # Převede čas ISO 8601 v UTC z GitHub API (2026-01-10T12:00:00Z) na sekundy
+  # od epochy. GNU date zná -d (Linux, Git Bash); BSD date na macOS -d nemá
+  # (illegal option) a parsuje -j -f s pevným formátem — GNU varianta první,
+  # BSD jako fallback (docs/bash/macos-prenositelnost.md). Nečitelný čas →
+  # rc 1 bez výstupu (volající rozhodne: „?", continue, return 1).
+  # Použití: _epoch=$(_gh-iso-epoch <ISO 8601 UTC>) || …
+  date -u -d "$1" +%s 2>/dev/null && return 0
+  date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null
+}
+
+_gh-file-mtime-fmt() {
+  # Vypíše čas poslední změny souboru v lokálním čase podle strftime formátu.
+  # Epochu čte GNU stat -c %Y (Linux, Git Bash), jinak BSD stat -f %m (macOS;
+  # -c je tam illegal option). GNU varianta musí být první: GNU stat -f %m by
+  # nehlásil chybu, ale vypsal mount point. Formátuje printf %()T bez dalšího
+  # procesu (bash ≥ 4.2); GNU `date -r <soubor>` by na BSD date znamenalo
+  # epochu v sekundách (docs/bash/macos-prenositelnost.md). Neexistující
+  # soubor → rc 1 bez výstupu.
+  # Použití: _gh-file-mtime-fmt <soubor> <strftime formát>
+  local _epoch
+  _epoch=$(stat -c %Y -- "$1" 2>/dev/null) || _epoch=$(stat -f %m -- "$1" 2>/dev/null) || return 1
+  printf "%($2)T\n" "$_epoch"
+}
+
+_gh-now-ms() {
+  # Naplní nameref aktuálním časem v milisekundách od epochy — měření doby
+  # kroku ve smyčkách s ETA (_bb-eta-print). Bez forku: čte $EPOCHREALTIME
+  # (bash ≥ 5.0, mikrosekundy). Jeho desetinný oddělovač se řídí LC_NUMERIC
+  # (pod cs_CZ čárka; přímé $(( EPOCHREALTIME )) by přes operátor čárka tiše
+  # vrátilo jen zlomek), proto se ponechají jen číslice (µs) a zkrátí na ms.
+  # Bez $EPOCHREALTIME (bash 4.3/4.4, nebo po `unset EPOCHREALTIME`, který
+  # speciální proměnnou v shellu natrvalo zruší) printf %()T (bash ≥ 4.2):
+  # celé sekundy × 1000, ETA měří hrubě. `date +%s%3N` nelze: BSD date na
+  # macOS %N nezná, vrátí „…3N" a aritmetika padá („value too great for
+  # base", docs/bash/macos-prenositelnost.md). Lokální jména mají prefix
+  # _gnm_, aby se na ně nameref volajícího nenavázal.
+  # Použití: _gh-now-ms <nameref výsledku>
+  declare -n _gnm_ref="$1"
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    local _gnm_us="${EPOCHREALTIME//[^0-9]/}"
+    _gnm_ref=$(( 10#$_gnm_us / 1000 ))
+  else
+    printf -v _gnm_ref '%(%s)T000' -1
+  fi
 }
 
 _gh-project-exists() {
