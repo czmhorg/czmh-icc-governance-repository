@@ -5,6 +5,19 @@
 # gh-functions-search.sh a bb-migrate.sh.
 # Načítej přes: source "$(dirname "${BASH_SOURCE[0]}")/gh-common-defs.sh"
 [[ -n "$_GH_COMMON_DEFS_LOADED" ]] && [[ "${BASH_SOURCE[0]}" == *gh-common-defs* ]] && return 0
+# Toolkit vyžaduje Bash 4.3+ (declare -n/-A, mapfile, ${var,,}); systémový
+# /bin/bash na macOS je 3.2 a bez kontroly by se každý blok ~/.bashrc rozpadl
+# na nesrozumitelných hláškách (docs/bash/macos-prenositelnost.md). Porovnání
+# ve funkci s argumenty — BASH_VERSINFO je readonly, testy ji nestubnou.
+_gh-bash-version-ok() {
+  # Použití: _gh-bash-version-ok <major> <minor>   (rc 0 = verze ≥ 4.3)
+  (( $1 > 4 || ($1 == 4 && $2 >= 3) ))
+}
+if ! _gh-bash-version-ok "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"; then
+  echo "Chyba: Bash $BASH_VERSION je příliš starý – gh skripty vyžadují Bash 4.3+. Na macOS otevři terminál s Bashem 5 (viz README_PREREQUISITES.md, sekce Instalace na macOS)." >&2
+  _GH_BASH_TOO_OLD=1
+  return 1 2>/dev/null || exit 1
+fi
 _GH_COMMON_DEFS_LOADED=1
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -31,14 +44,32 @@ _GH_COMMON_DEFS_LOADED=1
 # repo stále otevřené pro opakovanou migraci; bb-gh-migrated repo předané.
 # Interní konstanty (ne konfigurace). Žijí zde, protože je sdílí bb-migrate.sh,
 # tools/ i governance reconcile v gov repu (lib/bb-migration-control.sh se do
-# gov repa nenasazuje); helper _bb-migration-topic-present zůstává tam.
+# gov repa nenasazuje) — a s nimi i helper _bb-migration-topic-present.
 _BB_MIGRATION_TOPIC_MARKER=bb-gh-migrating
 _BB_MIGRATION_TOPIC_MARKER_DONE=bb-gh-migrated
+
+_bb-migration-topic-present() {
+  # rc 0 ⇔ CSV seznam topiců obsahuje přesně daný topic (celá položka, ne
+  # podřetězec). Jen builtiny. Používá migrace (bb-migrate.sh), tools/
+  # i governance moduly (vynechání repa v migraci ze správy obsahu rep).
+  # Použití: _bb-migration-topic-present <topicsCSV> <topic>
+  [[ ",$1," == *",$2,"* ]]
+}
 
 # Rezervovaný prefix názvů repository rulesetů spravovaných automatikou
 # (defs/defs.md): <GH_RULESET_PREFIX>-<profil>, např. mh-policy-default.
 # Hodnota bez koncové pomlčky; pomlčku doplňuje kód v místě použití.
 : "${GH_RULESET_PREFIX:=mh-policy}"
+
+# Rezervovaný prefix souborů workflow spravovaných automatikou (defs/defs.md:
+# workflow repa): .github/workflows/<GH_WORKFLOW_PREFIX>-<název>.yml ve výchozí
+# větvi repa, např. mh-workflow-release-merge-up.yml. Obsah = šablona
+# conf.d/workflows/<název>.yml gov repa (klíč workflows projektu nebo nastavení
+# repa) s hlavičkou GENEROVANO; conf.d je per prostředí, šablony se gov-syncem
+# nenasazují. Soubor s prefixem a hlavičkou automatika vlastní (osiřelý maže),
+# s prefixem bez hlavičky jen hlásí, bez prefixu nikdy nečte.
+# Hodnota bez koncové pomlčky; pomlčku doplňuje kód v místě použití.
+: "${GH_WORKFLOW_PREFIX:=mh-workflow}"
 
 # Tým security-managers (defs/defs.md: ghOrgSecurityManagersTeam) — vytváří ho
 # organizace, na každém repu je automaticky a nejde odebrat. Implicitní součást
@@ -135,6 +166,10 @@ _GH_BRANCH_NAME_REGEX='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 # = všechny události). Platnost názvu události ověřuje až GitHub API.
 _GH_WEBHOOK_URL_REGEX='^https?://[^[:space:]]+$'
 _GH_WEBHOOK_EVENT_REGEX='^[a-z_]+$'
+# Formát názvu policy profilu (conf.d/profiles/<název>.conf) a šablony workflow
+# (conf.d/workflows/<název>.yml; defs/defs.md: policy profile, sablona
+# workflow) — týž regex; položky klíčů rulesets a workflows ho musí splnit.
+_GH_CONF_TEMPLATE_NAME_REGEX='^[a-z][a-z0-9_-]*$'
 # Mapování workspace (GH_WORKSPACE_MAP, docs/implementovano/navrh/workspace-mapovani.md): vzor
 # ghName v klíči položky = znaky ghName plus glob znaky * a ? (rozsahy [...],
 # extglob a '**' se nepouštějí); hodnota = relativní cesta ze segmentů
@@ -198,18 +233,34 @@ _GH_WS_VALUE_REGEX='^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$'
 # odstup dvou stejných hlášení v jednom shellu. 0 = hlášení vypnuto.
 : "${GH_PR_NOTICE_TTL_MIN:=10}"
 
-# Hlídač PR na macOS (tools/pr-watcher.sh; docs/navrh/pr-watcher-macos.md):
+# Hlídač PR (macOS tools/pr-watcher.sh — docs/navrh/pr-watcher-macos.md:
 # LaunchAgent à 1 minutu, bubliny přes vlastní notifikátor — aplikaci
-# kompilovanou při instalaci z tools/pr-watcher-notifier.swift. Jen macOS;
-# windowsí hlídač tools/pr-watcher.ps1 má vlastní konfiguraci (.local.ps1).
+# kompilovanou při instalaci z tools/pr-watcher-notifier.swift; windowsí
+# hlídač tools/pr-watcher.ps1 má vlastní konfiguraci .local.ps1). Společný
+# pro oba je stavový adresář a odklad gh-pr-snooze
+# (docs/navrh/pr-watcher-ticho.md).
 # Opakovaná připomínka v minutách, dokud dotaz vrací PR; 0 = bublina jen při
-# novém PR / schválení.
+# novém PR / schválení. Jen macOS (Windows: $ReminderMinutes v .local.ps1).
 : "${GH_PR_WATCHER_REMINDER_MIN:=60}"
 
-# Stav hlídače, generované soubory kliknutí (pr-review.command, on-click.sh)
-# a log LaunchAgentu.
+# Výchozí doba odkladu bublin v minutách pro gh-pr-snooze bez čísla
+# (gh-functions-user.sh): odklad zapisuje epochu konce do souboru snooze-until
+# ve stavovém adresáři a oba hlídače během něj kontrolu přeskočí.
+: "${GH_PR_WATCHER_SNOOZE_MIN:=60}"
+
+# Stav hlídače, soubor odkladu snooze-until, na macOS i generované soubory
+# kliknutí (pr-inbox.command, on-click.sh) a log LaunchAgentu. Na Windows
+# (Git Bash dědí LOCALAPPDATA) tentýž adresář, ze kterého čte pr-watcher.ps1
+# ($StateDir = %LOCALAPPDATA%\gh-pr-watcher) — gh-pr-snooze tak píše tam, kde
+# hlídač čte; zpětná lomítka převádí expanze (Git Bash cestu C:/… přijímá,
+# cygpath by byl subproces při každém sourcování). Přepsání v .local.sh na
+# Windows nedává smysl: pr-watcher.ps1 tuto proměnnou nečte.
 # Nezapomeň: používej ${HOME}/..., ne ~/... (tilda se neexpanduje ve všech kontextech).
-: "${GH_PR_WATCHER_STATE_DIR:=${HOME}/.local/state/gh-pr-watcher}"
+if [[ -n "${LOCALAPPDATA:-}" ]]; then
+  : "${GH_PR_WATCHER_STATE_DIR:=${LOCALAPPDATA//\\//}/gh-pr-watcher}"
+else
+  : "${GH_PR_WATCHER_STATE_DIR:=${HOME}/.local/state/gh-pr-watcher}"
+fi
 
 # Aplikace notifikátoru. Musí ležet pod ${HOME}/Applications — z jiného
 # umístění macOS oprávnění k oznámením odmítne
@@ -232,10 +283,10 @@ fi
 
 # Co provede kliknutí na tělo bubliny nebo tlačítko Terminál (zapisuje se při
 # instalaci do on-click.sh). Prázdné = výchozí
-# open "${GH_PR_WATCHER_STATE_DIR}/pr-review.command" (Terminal.app spustí
-# gh-pr-list + gh-pr-review v interaktivním Bashi 5); výchozí se neskládá
+# open "${GH_PR_WATCHER_STATE_DIR}/pr-inbox.command" (Terminal.app spustí
+# gh-pr-list + gh-pr-inbox v interaktivním Bashi 5); výchozí se neskládá
 # zde, aby respektovalo GH_PR_WATCHER_STATE_DIR přepsaný v .local.sh.
-# iTerm2: open -a iTerm "<cesta k pr-review.command>".
+# iTerm2: open -a iTerm "<cesta k pr-inbox.command>".
 : "${GH_PR_WATCHER_CLICK_CMD:=}"
 
 # Kořen lokálního zrcadla pro vyhledávání v kódu projektů (gh-functions-search.sh).
@@ -297,6 +348,24 @@ _gh-match() {
   # Použití: _gh-match <řetězec> <ERE regex>    (negace: ! _gh-match ...)
   local LC_ALL=C
   [[ "$1" =~ $2 ]]
+}
+
+_gh-csv-to-array() {
+  # Rozloží CSV hodnotu na pole položek (nameref): oddělovač čárka, položky se
+  # neořezávají ani nevalidují, prázdné položky zůstávají („a,,b“ → tři,
+  # „a,“ → dvě — koncová čárka je prázdná položka, kterou validátory hlásí),
+  # prázdný řetězec → prázdné pole. Jen builtiny (load path conf.d). Jediná
+  # implementace smyčky nad CSV klíči conf.d a hodnotami z nich.
+  # Použití: _gh-csv-to-array <csv> <array_ref>
+  declare -n _cta_ref="$2"
+  local _rest="$1,"
+  _cta_ref=()
+  [[ -n "$1" ]] || return 0
+  while [[ -n "$_rest" ]]; do
+    _cta_ref+=("${_rest%%,*}")
+    _rest="${_rest#*,}"
+  done
+  return 0
 }
 
 _gh-branch-name-valid() {
@@ -917,8 +986,8 @@ _gh-repo-resolve-exact() {
 }
 
 _gh-repo-resolve-or-project() {
-  # Varianta pro workspace funkce s volitelným repem (gh-open, gh-cd): jediný
-  # poziční argument bez '/' a bez prefixu <GH_REPO_PREFIX>- je projectKey
+  # Varianta pro workspace funkce s volitelným repem (gh-open, gh-cd, gh-sync,
+  # gh-status): jediný poziční argument bez '/' a bez prefixu <GH_REPO_PREFIX>- je projectKey
   # (ghName a repoName zůstanou prázdné), cokoli jiného jde přes
   # _gh-repo-resolve-exact.
   # Použití: local -A _rr=(); _gh-repo-resolve-or-project _rr "${_pos[@]}" || return 1
@@ -1053,6 +1122,19 @@ _gh-file-mtime-fmt() {
   local _epoch
   _epoch=$(stat -c %Y -- "$1" 2>/dev/null) || _epoch=$(stat -f %m -- "$1" 2>/dev/null) || return 1
   printf "%($2)T\n" "$_epoch"
+}
+
+_gh-epoch-hm() {
+  # Vypíše čas z epochy v lokálním čase krátce: dnes jen HH:MM, jiný den
+  # DD.MM. HH:MM (konec odkladu hlídače PR — gh-pr-snooze, pr-watcher.sh;
+  # stejný tvar vypisuje pr-watcher.ps1). printf %()T bez dalšího procesu;
+  # %d a %m s nulami záměrně — %-d BSD strftime na macOS nezná.
+  # Použití: _gh-epoch-hm <epocha>
+  if [[ "$(printf '%(%Y%m%d)T' "$1")" == "$(printf '%(%Y%m%d)T' -1)" ]]; then
+    printf '%(%H:%M)T\n' "$1"
+  else
+    printf '%(%d.%m. %H:%M)T\n' "$1"
+  fi
 }
 
 _gh-now-ms() {

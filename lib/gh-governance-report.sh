@@ -5,8 +5,12 @@
 # cyklus reconcile issue (závazně defs/defs-governance-repo.md, sekce reconcile issue).
 # Itemy se sbírají jako TSV řádky `level\ttyp\trepo\tdetail`
 # do souboru; render do souhrnu běhu ($GITHUB_STEP_SUMMARY) a těla issue
-# (jen warning+error + odkaz na běh) dělají render funkce.
-# Závislosti: gh-common-defs.sh (_require_vars).
+# (jen warning+error + odkaz na běh) dělají render funkce. Společné tělo
+# *-apply-note funkcí modulů (položky reportu jednoho repa → řádky poznámky
+# do komentáře issue) je _gh-governance-apply-note; společná tolerance selhání
+# funkcí hlavní smyčky reconcile a repo-sync (rc != 0 → error položka, běh
+# pokračuje) je _gh-governance-report-tolerate.
+# Závislosti: gh-common-defs.sh (_require_vars, _BB_MIGRATION_TOPIC_MARKER).
 [[ -n "${_GH_GOVERNANCE_REPORT_LOADED:-}" ]] && \
   declare -F _gh-governance-report-add >/dev/null && return 0
 _GH_GOVERNANCE_REPORT_LOADED=1
@@ -51,6 +55,81 @@ _gh-governance-report-header() {
     "$(_gh-governance-report-count error "$_file")" \
     "$(_gh-governance-report-count warning "$_file")" \
     "$(_gh-governance-report-count info "$_file")"
+}
+
+_gh-governance-apply-note() {
+  # Společné tělo *-apply-note funkcí modulů (CODEOWNERS, webhook, workflows,
+  # příznaky repa) pro workflow životního cyklu repa (new/unarchive/move/
+  # rename): spustí reconcile funkci jednoho repa nad dočasným reportem a její
+  # položky vrátí jako řádky poznámky do komentáře issue (`<prefix>: <typ> –
+  # <detail>`). Poznámka je vždy neprázdná: repo v migraci (<topicsCSV>
+  # s topicem migrace) → `<prefix>: vynecháno (repo v migraci)` bez volání
+  # funkce, nula položek → `beze změny`, rc != 0 → `zápis selhal – <poslední
+  # řádek stderr>; dorovná denní reconcile` (stderr funkce projde dál do
+  # logu). Selhání operaci neshodí — rc vždy 0. Předchozí
+  # _GH_GOVERNANCE_REPORT_FILE volajícího (reconcile ji má nastavenou) se
+  # obnoví; bez ní zůstane unset. Lokály s prefixem _an_ — nameref na proměnnou
+  # volajícího nesmí kolidovat s lokálem stejného jména.
+  # Použití: _gh-governance-apply-note <prefix> <note_ref> <topicsCSV> <funkce> [args...]
+  local _an_prefix="$1" _an_topics="$3" _an_fn="$4"
+  declare -n _an_ref="$2"
+  shift 4
+  local _an_prev_set=0 _an_prev="" _an_tmp _an_err _an_rc=0 _an_n=0
+  local _an_level _an_type _an_repo _an_detail
+  _an_ref=""
+  if _bb-migration-topic-present "$_an_topics" "$_BB_MIGRATION_TOPIC_MARKER"; then
+    _an_ref="$_an_prefix: vynecháno (repo v migraci)"
+    return 0
+  fi
+  if [[ -v _GH_GOVERNANCE_REPORT_FILE ]]; then
+    _an_prev_set=1
+    _an_prev="$_GH_GOVERNANCE_REPORT_FILE"
+  fi
+  if ! _an_tmp=$(mktemp) || ! _an_err=$(mktemp); then
+    _an_ref="$_an_prefix: zápis selhal – mktemp selhal; dorovná denní reconcile"
+    return 0
+  fi
+  _gh-governance-report-init "$_an_tmp"
+  "$_an_fn" "$@" 2>"$_an_err" || _an_rc=$?
+  if [[ $_an_prev_set -eq 1 ]]; then
+    _GH_GOVERNANCE_REPORT_FILE="$_an_prev"
+  else
+    unset _GH_GOVERNANCE_REPORT_FILE
+  fi
+  [[ -s "$_an_err" ]] && cat "$_an_err" >&2
+  while IFS=$'\t' read -r _an_level _an_type _an_repo _an_detail; do
+    [[ -n "$_an_level" ]] || continue
+    _an_ref+="${_an_ref:+$'\n'}$_an_prefix: ${_an_type} – ${_an_detail}"
+    _an_n=$(( _an_n + 1 ))
+  done < "$_an_tmp"
+  if [[ $_an_rc -ne 0 ]]; then
+    _an_ref+="${_an_ref:+$'\n'}$_an_prefix: zápis selhal – $(tail -n 1 "$_an_err"); dorovná denní reconcile"
+  elif [[ $_an_n -eq 0 ]]; then
+    _an_ref="$_an_prefix: beze změny"
+  fi
+  rm -f "$_an_tmp" "$_an_err"
+  return 0
+}
+
+_gh-governance-report-tolerate() {
+  # Spustí funkci správy jednoho repa (policy, CODEOWNERS, webhook, soubory
+  # workflow, příznaky repa) s tolerancí selhání hlavní smyčky reconcile
+  # a repo-sync: rc != 0 → error položka `neuspesna reconciliace repa` s detailem
+  # `<label>: <poslední řádek stderr>` (bez <label> jen poslední řádek), běh
+  # pokračuje další funkcí/repem. Stderr funkce se jinak zahazuje (do reportu
+  # jde jen poslední řádek). Vrací rc funkce (volající ho obvykle ignoruje);
+  # rc 1 bez položky jen při selhání mktemp.
+  # Použití: _gh-governance-report-tolerate <repoPath> <label|''> <funkce> [args...]
+  local _rt_repo="$1" _rt_label="$2" _rt_fn="$3" _rt_err _rt_rc=0
+  shift 3
+  _rt_err=$(mktemp) || return 1
+  "$_rt_fn" "$@" 2>"$_rt_err" || _rt_rc=$?
+  if [[ $_rt_rc -ne 0 ]]; then
+    _gh-governance-report-add error "neuspesna reconciliace repa" "$_rt_repo" \
+      "${_rt_label:+$_rt_label: }$(tail -n 1 "$_rt_err")"
+  fi
+  rm -f "$_rt_err"
+  return $_rt_rc
 }
 
 _gh-governance-report-render() {

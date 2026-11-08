@@ -4,11 +4,13 @@
 # Distribuce spravované sekce .github/CODEOWNERS a doprovodného
 # CODEOWNERS_README.md do spravovaných rep podle klíče pr_reviewers_team
 # (defs/defs.md; docs/plans/plan-codeowners-distribuce.md). Rozhodovací
-# logika je v čistých funkcích (offline testy), zápisy jdou přes Contents
-# API (jeden commit na soubor, bez klonu; přes rulesety projde bot díky
-# svému bypass týmu — bypass actor Team/always, defs/defs.md: bypass tym).
-# Jediné místo, kde governance zapisuje obsah spravovaných
-# rep — výhradně v souborech/sekcích označených vlastními značkami.
+# logika je v čistých funkcích (offline testy), zápisy jdou přes sdílený
+# modul Contents API lib/gh-governance-contents.sh (jeden commit na soubor,
+# bez klonu; přes rulesety projde bot díky svému bypass týmu — bypass actor
+# Team/always, defs/defs.md: bypass tym). Governance zapisuje obsah
+# spravovaných rep výhradně v souborech/sekcích označených vlastními
+# značkami (zde CODEOWNERS a CODEOWNERS_README.md; soubory workflow
+# lib/gh-governance-workflows.sh).
 # Volají ji: denní reconcile (hlavní smyčka), workflow repo-sync
 # (lib/gh-governance-repo-sync.sh — jeden projekt, spouští governance
 # issue nebo push do conf.d/projects/**) a workflow životního cyklu repa
@@ -17,6 +19,7 @@
 # repa přepisuje projekt, none = žádný tým; defs/defs.md).
 # Závislosti: gh-common-defs.sh (_gh-match, _require_vars, GH_REPO_PREFIX,
 # topicy migrace), lib/gh-conf.sh (_gh-conf-effective),
+# lib/gh-governance-contents.sh (_gh-governance-contents-read/-write/-delete),
 # lib/gh-governance-report.sh, lib/gh-governance-state.sh
 # (_gh-governance-checkout-root, _gh-governance-conf-effective-at-commit),
 # lib/gh-governance-deploy-manifest.sh (strip hlavičky šablon).
@@ -80,18 +83,15 @@ _gh-governance-codeowners-old-owners() {
 _gh-governance-codeowners-expand() {
   # Expanduje šablonu do nameref: odstraní hlavičku GENEROVANO gov-sync
   # (v gov repu ji nese každý nasazený soubor) a nahradí {{PROJECT_KEY}}
-  # a {{OWNERS}}.
+  # a {{OWNERS}} (_gh-governance-template-expand).
   # Použití: _gh-governance-codeowners-expand <soubor> <projectKey> <owners> <nameref>
-  declare -n _ce_ref="$4"
   local _content
   if [[ ! -f "$1" ]]; then
     echo "Chyba: Šablona '$1' neexistuje (nasazuje ji gov-sync)." >&2
     return 1
   fi
   _content=$(_gh-governance-deploy-manifest-header-strip < "$1") || return 1
-  _content="${_content//\{\{PROJECT_KEY\}\}/$2}"
-  _content="${_content//\{\{OWNERS\}\}/$3}"
-  _ce_ref="$_content"
+  _gh-governance-template-expand "$_content" "$4" "PROJECT_KEY=$2" "OWNERS=$3"
 }
 
 _gh-governance-codeowners-section() {
@@ -213,54 +213,6 @@ _gh-governance-codeowners-plan() {
   return 0
 }
 
-_gh-governance-codeowners-file-read() {
-  # Načte soubor spravovaného repa přes Contents API. rc 0 = načteno
-  # (content + blob sha do namerefs), rc 1 = neexistuje (HTTP 404),
-  # rc 2 = jiná chyba (poslední řádek stderr gh projde).
-  # Použití: _gh-governance-codeowners-file-read <repoPath> <cesta> <branch>
-  #          <content_ref> <sha_ref>
-  declare -n _fr_content="$4" _fr_sha="$5"
-  local _resp _err_file _err
-  _fr_content=""; _fr_sha=""
-  _err_file=$(mktemp) || return 2
-  if ! _resp=$(GH_HOST="$GITHUB_ORG_HOSTNAME" gh api \
-      "repos/$1/contents/$2?ref=$3" \
-      --jq '.sha + "\t" + (.content | gsub("\n";""))' 2>"$_err_file"); then
-    _err=$(< "$_err_file")
-    rm -f "$_err_file"
-    grep -qF '(HTTP 404)' <<< "$_err" && return 1
-    [[ -n "$_err" ]] && printf '%s\n' "$_err" >&2
-    return 2
-  fi
-  rm -f "$_err_file"
-  _fr_sha="${_resp%%$'\t'*}"
-  _fr_content=$(printf '%s' "${_resp#*$'\t'}" | base64 -d) || return 2
-  return 0
-}
-
-_gh-governance-codeowners-file-write() {
-  # Založí/aktualizuje soubor přes Contents API (jeden commit do výchozí
-  # větve). Prázdné <sha> = založení, jinak update existujícího blobu.
-  # Použití: _gh-governance-codeowners-file-write <repoPath> <cesta> <branch>
-  #          <obsah> <sha|''> <commit message>
-  local _b64
-  local -a _args=(-f message="$6" -f branch="$3")
-  _b64=$(printf '%s' "$4" | base64 | tr -d '\n') || return 1
-  _args+=(-f content="$_b64")
-  [[ -n "$5" ]] && _args+=(-f sha="$5")
-  GH_HOST="$GITHUB_ORG_HOSTNAME" gh api --method PUT \
-    "repos/$1/contents/$2" "${_args[@]}" >/dev/null
-}
-
-_gh-governance-codeowners-file-delete() {
-  # Smaže soubor přes Contents API (jeden commit do výchozí větve).
-  # Použití: _gh-governance-codeowners-file-delete <repoPath> <cesta> <branch>
-  #          <sha> <commit message>
-  GH_HOST="$GITHUB_ORG_HOSTNAME" gh api --method DELETE \
-    "repos/$1/contents/$2" \
-    -f message="$5" -f branch="$3" -f sha="$4" >/dev/null
-}
-
 _gh-governance-codeowners-teams-check() {
   # Warning za tým z efektivního pr_reviewers_team bez práva write na repu —
   # GitHub CODEOWNERS vlastníka bez write ignoruje (runtime stav repa;
@@ -292,7 +244,7 @@ _gh-governance-codeowners-readme-sync() {
   #          <projectKey> <owners> <managed>
   local _repo_path="$1" _branch="$2" _root="$3" _key="$4" _owners="$5" _managed="$6"
   local _desired="" _current="" _sha="" _exists=1 _rc
-  _gh-governance-codeowners-file-read "$_repo_path" \
+  _gh-governance-contents-read "$_repo_path" \
     "$_GH_GOVERNANCE_CODEOWNERS_README_PATH" "$_branch" _current _sha
   _rc=$?
   [[ $_rc -eq 2 ]] && return 1
@@ -302,7 +254,7 @@ _gh-governance-codeowners-readme-sync() {
       "$_root/$_GH_GOVERNANCE_CODEOWNERS_README_TEMPLATE" "$_key" "$_owners" \
       _desired || return 1
     if [[ $_exists -eq 0 || "$_current" != "$_desired" ]]; then
-      _gh-governance-codeowners-file-write "$_repo_path" \
+      _gh-governance-contents-write "$_repo_path" \
         "$_GH_GOVERNANCE_CODEOWNERS_README_PATH" "$_branch" "$_desired"$'\n' \
         "$_sha" "governance: CODEOWNERS_README dle pr_reviewers_team" || return 1
       _gh-governance-report-add info "sprava CODEOWNERS" "$_repo_path" \
@@ -313,7 +265,7 @@ _gh-governance-codeowners-readme-sync() {
   # Sekce nespravovaná: životní cyklus README je svázaný se sekcí.
   [[ $_exists -eq 1 ]] || return 0
   [[ "${_current%%$'\n'*}" == "$_GH_GOVERNANCE_CODEOWNERS_HEADER_MD" ]] || return 0
-  _gh-governance-codeowners-file-delete "$_repo_path" \
+  _gh-governance-contents-delete "$_repo_path" \
     "$_GH_GOVERNANCE_CODEOWNERS_README_PATH" "$_branch" "$_sha" \
     "governance: uklid CODEOWNERS_README (sekce neni spravovana)" || return 1
   _gh-governance-report-add info "sprava CODEOWNERS" "$_repo_path" \
@@ -339,7 +291,7 @@ _gh-governance-reconcile-codeowners() {
   local _repo_path="${GITHUB_ORG}/${_name}" _root _owners="" _old_owners=""
   local _section="" _notice="" _content="" _sha="" _exists=1 _rc
   local _action="" _new="" _old_section="" _b="" _s="" _a="" _managed=0
-  [[ ",$_topics," == *",${_BB_MIGRATION_TOPIC_MARKER},"* ]] && return 0
+  _bb-migration-topic-present "$_topics" "$_BB_MIGRATION_TOPIC_MARKER" && return 0
   [[ -n "$_branch" ]] || return 0
   _root=$(_gh-governance-checkout-root) || return 1
   _gh-governance-codeowners-owners "$_key" "$_gh_name" _owners
@@ -347,7 +299,7 @@ _gh-governance-reconcile-codeowners() {
     _gh-governance-codeowners-section "$_root" "$_key" "$_owners" _section || return 1
     _gh-governance-codeowners-notice "$_key" _notice
   fi
-  _gh-governance-codeowners-file-read "$_repo_path" \
+  _gh-governance-contents-read "$_repo_path" \
     "$_GH_GOVERNANCE_CODEOWNERS_PATH" "$_branch" _content _sha
   _rc=$?
   [[ $_rc -eq 2 ]] && return 1
@@ -356,14 +308,14 @@ _gh-governance-reconcile-codeowners() {
     _action _new
   case "$_action" in
     create)
-      _gh-governance-codeowners-file-write "$_repo_path" \
+      _gh-governance-contents-write "$_repo_path" \
         "$_GH_GOVERNANCE_CODEOWNERS_PATH" "$_branch" "$_new" "" \
         "governance: CODEOWNERS se spravovanou sekci (pr_reviewers_team)" || return 1
       _gh-governance-report-add info "sprava CODEOWNERS" "$_repo_path" \
         "CODEOWNERS založen se spravovanou sekcí (${_owners})"
       _managed=1 ;;
     rewrite)
-      _gh-governance-codeowners-file-write "$_repo_path" \
+      _gh-governance-contents-write "$_repo_path" \
         "$_GH_GOVERNANCE_CODEOWNERS_PATH" "$_branch" "$_new" "$_sha" \
         "governance: sprava sekce CODEOWNERS dle pr_reviewers_team" || return 1
       # Ruční zásah vs. změna conf.d: sekce vzniklá ze staré konfigurace
@@ -385,7 +337,7 @@ _gh-governance-reconcile-codeowners() {
     noop)
       _managed=1 ;;
     notice)
-      _gh-governance-codeowners-file-write "$_repo_path" \
+      _gh-governance-contents-write "$_repo_path" \
         "$_GH_GOVERNANCE_CODEOWNERS_PATH" "$_branch" "$_new" "$_sha" \
         "governance: oznameni v CODEOWNERS (soubor neni pod spravou)" || return 1
       _gh-governance-report-add warning "CODEOWNERS mimo spravu" "$_repo_path" \
@@ -394,13 +346,13 @@ _gh-governance-reconcile-codeowners() {
       _gh-governance-report-add warning "CODEOWNERS mimo spravu" "$_repo_path" \
         "soubor bez spravované sekce (oznámení už vloženo) — pr_reviewers_team se neaplikuje" ;;
     remove)
-      _gh-governance-codeowners-file-write "$_repo_path" \
+      _gh-governance-contents-write "$_repo_path" \
         "$_GH_GOVERNANCE_CODEOWNERS_PATH" "$_branch" "$_new" "$_sha" \
         "governance: uklid sekce CODEOWNERS po odebrani pr_reviewers_team" || return 1
       _gh-governance-report-add info "sprava CODEOWNERS" "$_repo_path" \
         "spravovaná sekce odstraněna po odebrání pr_reviewers_team" ;;
     delete)
-      _gh-governance-codeowners-file-delete "$_repo_path" \
+      _gh-governance-contents-delete "$_repo_path" \
         "$_GH_GOVERNANCE_CODEOWNERS_PATH" "$_branch" "$_sha" \
         "governance: uklid CODEOWNERS po odebrani pr_reviewers_team" || return 1
       _gh-governance-report-add info "sprava CODEOWNERS" "$_repo_path" \
@@ -418,51 +370,14 @@ _gh-governance-reconcile-codeowners() {
 
 _gh-governance-codeowners-apply-note() {
   # Zápis CODEOWNERS jednoho repa ve workflow životního cyklu
-  # (new/unarchive/move/rename): volá _gh-governance-reconcile-codeowners
-  # nad dočasným reportem a jeho položky vrátí jako řádky poznámky do
-  # komentáře issue (`CODEOWNERS: <typ> – <detail>`). Poznámka je vždy
-  # neprázdná: repo v migraci → `vynecháno (repo v migraci)` (funkce by
-  # skončila tiše), nula položek → `beze změny`, rc != 0 → `zápis selhal –
-  # <poslední řádek stderr>; dorovná denní reconcile` (stderr funkce projde
-  # dál do logu). Selhání zápisu operaci neshodí — rc vždy 0. Předchozí
-  # _GH_GOVERNANCE_REPORT_FILE volajícího (reconcile ji má nastavenou)
-  # se obnoví; jiný globální stav funkce nepoužívá.
+  # (new/unarchive/move/rename): položky reportu _gh-governance-reconcile-codeowners
+  # jako řádky poznámky `CODEOWNERS: <typ> – <detail>` do komentáře issue —
+  # společné tělo _gh-governance-apply-note (lib/gh-governance-report.sh:
+  # repo v migraci → vynecháno bez volání, nula položek → beze změny, rc != 0
+  # → zápis selhal s posledním řádkem stderr; rc vždy 0, report volajícího
+  # se obnoví).
   # Použití: _gh-governance-codeowners-apply-note <repoName> <branch>
   #          <projectKey> <topicsCSV> <pointer_sha|''> <note_ref>
-  declare -n _an_ref="$6"
-  local _an_prev_set=0 _an_prev="" _an_tmp _an_err _an_rc=0 _an_n=0
-  local _an_level _an_type _an_repo _an_detail
-  _an_ref=""
-  if [[ ",$4," == *",${_BB_MIGRATION_TOPIC_MARKER},"* ]]; then
-    _an_ref="CODEOWNERS: vynecháno (repo v migraci)"
-    return 0
-  fi
-  if [[ -v _GH_GOVERNANCE_REPORT_FILE ]]; then
-    _an_prev_set=1
-    _an_prev="$_GH_GOVERNANCE_REPORT_FILE"
-  fi
-  if ! _an_tmp=$(mktemp) || ! _an_err=$(mktemp); then
-    _an_ref="CODEOWNERS: zápis selhal – mktemp selhal; dorovná denní reconcile"
-    return 0
-  fi
-  _gh-governance-report-init "$_an_tmp"
-  _gh-governance-reconcile-codeowners "$1" "$2" "$3" "$4" "$5" 2>"$_an_err" || _an_rc=$?
-  if [[ $_an_prev_set -eq 1 ]]; then
-    _GH_GOVERNANCE_REPORT_FILE="$_an_prev"
-  else
-    unset _GH_GOVERNANCE_REPORT_FILE
-  fi
-  [[ -s "$_an_err" ]] && cat "$_an_err" >&2
-  while IFS=$'\t' read -r _an_level _an_type _an_repo _an_detail; do
-    [[ -n "$_an_level" ]] || continue
-    _an_ref+="${_an_ref:+$'\n'}CODEOWNERS: ${_an_type} – ${_an_detail}"
-    _an_n=$(( _an_n + 1 ))
-  done < "$_an_tmp"
-  if [[ $_an_rc -ne 0 ]]; then
-    _an_ref+="${_an_ref:+$'\n'}CODEOWNERS: zápis selhal – $(tail -n 1 "$_an_err"); dorovná denní reconcile"
-  elif [[ $_an_n -eq 0 ]]; then
-    _an_ref="CODEOWNERS: beze změny"
-  fi
-  rm -f "$_an_tmp" "$_an_err"
-  return 0
+  _gh-governance-apply-note "CODEOWNERS" "$6" "$4" \
+    _gh-governance-reconcile-codeowners "$1" "$2" "$3" "$4" "$5"
 }

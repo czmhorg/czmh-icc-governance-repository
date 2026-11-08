@@ -2,18 +2,24 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
 # Bezpečný parser INI konfigurace conf.d/ (projects/, projects/<key>/ —
-# nastavení jednotlivých rep, business-services/, domains/, profiles/).
+# nastavení jednotlivých rep, business-services/, domains/, profiles/)
+# a evidence šablon workflow workflows/<název>.yml (jen názvy, obsah se nečte).
 # Načítá soubory klíč=hodnota do asociativního pole _GH_CONF bez sourcování.
 # Formát a pravidla: docs/readme/README_COMMON.md (sekce Konfigurace projektů).
 # Běží při každém startu shellu (source z gh-common-defs.sh) – v load path
-# jsou povoleny pouze bash builtiny, žádné spouštění externích procesů.
+# jsou povoleny pouze bash builtiny, žádné spouštění externích procesů
+# (jedinou výjimkou je _gh-conf-projects-using-workflow se sort — volá ji až
+# workflow repo-sync za běhu, ne načtení).
 # Závislosti z gh-common-defs.sh (definovány před sourcováním tohoto modulu):
-# _gh-match (sám je jen builtin [[ =~ ]] s lokálním LC_ALL=C), _GH_GHNAME_REGEX
-# (názvy souborů nastavení repa), _gh-branch-name-valid + _GH_BRANCH_NAME_REGEX
+# _gh-match (sám je jen builtin [[ =~ ]] s lokálním LC_ALL=C), _gh-csv-to-array
+# (rozklad CSV hodnot, builtiny), _GH_GHNAME_REGEX
+# (názvy souborů nastavení repa), _GH_CONF_TEMPLATE_NAME_REGEX (názvy profilů
+# a šablon workflow), _gh-branch-name-valid + _GH_BRANCH_NAME_REGEX
 # (klíč default_branch), _GH_WEBHOOK_URL_REGEX + _GH_WEBHOOK_EVENT_REGEX
 # (klíče webhook_url, webhook_events) a konfigurační proměnné
 # GH_GOVERNANCE_REPO + GH_REPO_PREFIX (rezervovaný projectKey),
-# GH_SECURITY_MANAGERS_TEAM, GH_WEBHOOK_EVENTS_DEFAULT.
+# GH_SECURITY_MANAGERS_TEAM, GH_WEBHOOK_EVENTS_DEFAULT. GH_WORKFLOW_PREFIX
+# parser nepotřebuje — prefix souborů doplňuje až governance při zápisu.
 [[ -n "${_GH_CONF_LOADED:-}" ]] && \
   declare -F _gh-conf-load >/dev/null && return 0
 _GH_CONF_LOADED=1
@@ -43,18 +49,26 @@ _GH_CONF_PROFILE_BOOL_FIELDS="enforce_admins dismiss_stale_reviews require_code_
 _GH_CONF_PROFILE_OPT_FIELDS="require_pull_request"
 _GH_CONF_PROJECT_FIELDS="display_name domain rulesets repository_teams repository_creators repository_archivers"
 # Klíče, které smí obsahovat nastavení repa (rulesets, pr_reviewers_team,
-# default_branch, webhook_url a webhook_events přepisují hodnotu projektu,
-# repository_teams_add přidává týmy).
-_GH_CONF_REPO_FIELDS="rulesets pr_reviewers_team default_branch repository_teams_add webhook_url webhook_events"
+# default_branch, webhook_url, webhook_events, workflows, allow_auto_merge
+# a actions_create_pr přepisují hodnotu projektu, repository_teams_add přidává
+# týmy).
+_GH_CONF_REPO_FIELDS="rulesets pr_reviewers_team default_branch repository_teams_add webhook_url webhook_events workflows allow_auto_merge actions_create_pr"
 # Rezervovaná hodnota: v rulesets = žádné rulesety mh-policy-* (položka musí
-# být jediná, profiles/none.conf je chyba); v pr_reviewers_team a webhook_url
-# nastavení repa = žádný tým / žádný spravovaný webhook (v projektu chyba).
+# být jediná, profiles/none.conf je chyba); v pr_reviewers_team, webhook_url
+# a workflows nastavení repa = žádný tým / žádný spravovaný webhook / žádné
+# spravované workflow (v projektu chyba; workflows/none.yml je chyba).
 _GH_CONF_NONE=none
 # Nepovinná pole projektu; přítomný klíč musí mít neprázdnou hodnotu.
 # default_branch = výchozí větev nově zakládaného repa (defs/defs.md),
 # formát _gh-branch-name-valid (gh-common-defs.sh); webhook_url +
-# webhook_events = spravovaný webhook rep (defs/defs.md: webhook repa).
-_GH_CONF_PROJECT_OPT_FIELDS="description pr_reviewers_team default_branch webhook_url webhook_events"
+# webhook_events = spravovaný webhook rep (defs/defs.md: webhook repa);
+# workflows = CSV šablon workflow rep (defs/defs.md: workflow repa);
+# allow_auto_merge + actions_create_pr = příznaky repa (_GH_CONF_REPO_FLAG_FIELDS).
+_GH_CONF_PROJECT_OPT_FIELDS="description pr_reviewers_team default_branch webhook_url webhook_events workflows allow_auto_merge actions_create_pr"
+# Příznaky repa (defs/defs.md: priznaky repa) — nastavení GitHub repa držená
+# podle klíče, hodnoty true|false; klíč chybí = governance nastavení nečte ani
+# nemění. Seznam sdílí validace projektu i nastavení repa a governance modul.
+_GH_CONF_REPO_FLAG_FIELDS="allow_auto_merge actions_create_pr"
 # Práva v repository_teams zajišťující write — CODEOWNERS vlastníka bez write
 # GitHub ignoruje, tým v pr_reviewers_team proto musí mít některé z nich.
 _GH_CONF_PR_REVIEWERS_PERMS="push write maintain admin"
@@ -67,7 +81,7 @@ _GH_CONF_LOGIN_REGEX='^[[:alnum:]]([[:alnum:]-]{0,37}[[:alnum:]])?$'
 _GH_CONF_TEAM_REGEX='^[[:alnum:]][[:alnum:]_.-]*\|(pull|triage|push|maintain|admin|read|write)$'
 _GH_CONF_NAME_REGEX='^[[:alnum:]][[:alnum:]_.-]*$'
 # Položka klíče rulesets: <profil> nebo <profil>|jenkins; jméno profilu musí
-# odpovídat regexu názvu souboru profiles/*.conf (viz _gh-conf-load).
+# odpovídat regexu názvu souboru profiles/*.conf (_GH_CONF_TEMPLATE_NAME_REGEX).
 _GH_CONF_RULESET_ITEM_REGEX='^[a-z][a-z0-9_-]*(\|jenkins)?$'
 
 _gh-conf-err() {
@@ -196,13 +210,47 @@ _gh-conf-load-repos() {
   return 0
 }
 
+_gh-conf-load-workflows() {
+  # Načte jmenný prostor šablon workflow workflows/<název>.yml (defs/defs.md,
+  # sablona workflow): eviduje jen názvy do nameref množiny <seen_ref> — obsah
+  # YAML parser nečte ani nevaliduje (v load path jen builtiny; expanduje ho až
+  # governance při zápisu do rep) a do _GH_CONF nic nezapisuje. Fail-loud jako
+  # projects/: přijme jen regulární soubor <název>.yml s názvem dle
+  # _GH_CONF_TEMPLATE_NAME_REGEX a neprázdným obsahem; jiná položka (.yaml,
+  # README, podadresář, symlink) i prázdný soubor jsou chyby. Adresář
+  # workflows/ nemusí existovat.
+  # Použití: _gh-conf-load-workflows <confd_root> <errors_ref> <seen_ref>
+  local _root="$1" _f _base _name
+  declare -n _lw_seen="$3"
+  if [[ -e "$_root/workflows" && ! -d "$_root/workflows" ]]; then
+    _gh-conf-err "$2" "workflows" "není adresář (očekává se adresář šablon workflow <název>.yml)"
+    return 0
+  fi
+  for _f in "$_root/workflows"/*; do
+    [[ -e "$_f" || -L "$_f" ]] || continue
+    _base="${_f##*/}"
+    _name="${_base%.yml}"
+    if [[ ! -f "$_f" || -L "$_f" || "$_base" != *.yml ]] || ! _gh-match "$_name" "$_GH_CONF_TEMPLATE_NAME_REGEX"; then
+      _gh-conf-err "$2" "workflows/$_base" "neočekávaná položka (povoleny jen šablony workflow <název>.yml, název dle $_GH_CONF_TEMPLATE_NAME_REGEX)"
+      continue
+    fi
+    if [[ ! -s "$_f" ]]; then
+      _gh-conf-err "$2" "workflows/$_base" "šablona workflow je prázdná"
+      continue
+    fi
+    _lw_seen["$_name"]=1
+  done
+  return 0
+}
+
 _gh-conf-validate-csv() {
-  # Ověří CSV hodnotu: žádné prázdné položky, každá položka odpovídá regexu.
+  # Ověří CSV hodnotu: žádné prázdné položky (prázdná hodnota = jedna prázdná
+  # položka), každá položka odpovídá regexu.
   # Použití: _gh-conf-validate-csv <hodnota> <regex> <relativní cesta> <klíč> <errors_ref>
-  local _rest="$1," _regex="$2" _rel="$3" _keyname="$4" _item _rc=0
-  while [[ -n "$_rest" ]]; do
-    _item="${_rest%%,*}"
-    _rest="${_rest#*,}"
+  local _regex="$2" _rel="$3" _keyname="$4" _item _rc=0
+  local -a _items=("")
+  [[ -z "$1" ]] || _gh-csv-to-array "$1" _items
+  for _item in "${_items[@]}"; do
     if [[ -z "$_item" ]]; then
       _gh-conf-err "$5" "$_rel" "klíč '$_keyname' obsahuje prázdnou položku"
       _rc=1
@@ -214,6 +262,19 @@ _gh-conf-validate-csv() {
   return $_rc
 }
 
+_gh-conf-validate-bool() {
+  # Zvaliduje hodnotu bool klíče: jen 'true' nebo 'false' (prázdnou hodnotu
+  # hlásí jako chybu — volající, který prázdný klíč hlásí sám, ji nepředává).
+  # Sdílí bool pole profilu (_gh-conf-validate-policy-fields) a příznaky repa
+  # (_gh-conf-validate-repo-flags).
+  # Použití: _gh-conf-validate-bool <hodnota> <rel> <klíč> <errors_ref>
+  case "$1" in
+    true|false) ;;
+    *) _gh-conf-err "$4" "$2" "klíč '$3' smí mít jen hodnotu 'true' nebo 'false' (je '$1')" ;;
+  esac
+  return 0
+}
+
 _gh-conf-validate-policy-fields() {
   # Zvaliduje pole ochrany větve pod prefixem <ns/název> v _GH_CONF;
   # pole _GH_CONF_PROFILE_FIELDS jsou povinná a neprázdná, pole
@@ -222,10 +283,7 @@ _gh-conf-validate-policy-fields() {
   local _prefix="$1" _rel="$2" _field _value
   for _field in $_GH_CONF_PROFILE_OPT_FIELDS; do
     [[ -v _GH_CONF["$_prefix/$_field"] ]] || continue
-    case "${_GH_CONF[$_prefix/$_field]}" in
-      true|false) ;;
-      *) _gh-conf-err "$3" "$_rel" "klíč '$_field' smí mít jen hodnotu 'true' nebo 'false' (je '${_GH_CONF[$_prefix/$_field]}')" ;;
-    esac
+    _gh-conf-validate-bool "${_GH_CONF[$_prefix/$_field]}" "$_rel" "$_field" "$3"
   done
   for _field in $_GH_CONF_PROFILE_FIELDS; do
     if [[ ! -v _GH_CONF["$_prefix/$_field"] ]]; then
@@ -236,10 +294,7 @@ _gh-conf-validate-policy-fields() {
     if [[ -z "$_value" ]]; then
       _gh-conf-err "$3" "$_rel" "klíč '$_field' má prázdnou hodnotu"
     elif [[ " $_GH_CONF_PROFILE_BOOL_FIELDS " == *" $_field "* ]]; then
-      case "$_value" in
-        true|false) ;;
-        *) _gh-conf-err "$3" "$_rel" "klíč '$_field' smí mít jen hodnotu 'true' nebo 'false' (je '$_value')" ;;
-      esac
+      _gh-conf-validate-bool "$_value" "$_rel" "$_field" "$3"
     elif [[ "$_field" == required_approving_review_count && ! "$_value" =~ ^[0-9]+$ ]]; then
       _gh-conf-err "$3" "$_rel" "klíč '$_field' musí být nezáporné číslo (je '$_value')"
     fi
@@ -305,35 +360,60 @@ _gh-conf-validate-domain() {
   return 0
 }
 
+_gh-conf-err-none-only-repo() {
+  # Chyba „hodnota none jen v nastavení repa“ v jednotném znění (klíče
+  # pr_reviewers_team, webhook_url, workflows — v projektu se klíč vynechá).
+  # Použití: _gh-conf-err-none-only-repo <errors_ref> <rel> <klíč> <popis none>
+  _gh-conf-err "$1" "$2" "hodnota '$_GH_CONF_NONE' klíče '$3' ($4) je povolena jen v nastavení repa; v projektu klíč vynech"
+}
+
+_gh-conf-validate-ref-items() {
+  # Společná validace CSV položek odkazujících na soubory jmenného prostoru
+  # (rulesets → profiles/<profil>.conf, workflows → workflows/<název>.yml):
+  # položka none (<popis none>) na soubor neodkazuje a musí být jediná, jiná
+  # položka musí být v množině <seen_ref> (cíl hlášky dle <cíl_fmt> s %s),
+  # bez duplicit (<podstatné jméno> do hlášky). Odkaz = položka před prvním
+  # '|' (atribut |jenkins). Položky už prošly _gh-conf-validate-csv.
+  # Použití: _gh-conf-validate-ref-items <hodnota> <rel> <klíč> <popis none>
+  #          <cíl_fmt> <podstatné jméno> <errors_ref> <seen_ref>
+  local _value="$1" _rel="$2" _keyname="$3" _item _ref _target
+  local -a _items=()
+  local -A _dup=()
+  declare -n _vri_seen="$8"
+  _gh-csv-to-array "$_value" _items
+  for _item in "${_items[@]}"; do
+    _ref="${_item%%|*}"
+    if [[ "$_ref" == "$_GH_CONF_NONE" ]]; then
+      [[ "$_value" == "$_item" ]] || \
+        _gh-conf-err "$7" "$_rel" "položka '$_item' v klíči '$_keyname' ($4) musí být jediná (je '$_value')"
+    elif [[ ! -v _vri_seen["$_ref"] ]]; then
+      printf -v _target "$5" "$_ref"
+      _gh-conf-err "$7" "$_rel" "položka '$_item' v klíči '$_keyname' neodkazuje na existující $_target"
+    fi
+    if [[ -v _dup["$_ref"] ]]; then
+      _gh-conf-err "$7" "$_rel" "duplicitní $6 '$_ref' v klíči '$_keyname'"
+    fi
+    _dup["$_ref"]=1
+  done
+  return 0
+}
+
 _gh-conf-validate-rulesets() {
   # Zvaliduje hodnotu klíče rulesets (projekt i nastavení repa): formát
-  # položek, odkaz na existující profil, duplicita profilu, atribut |jenkins
-  # jen v doméně s jenkins_user; rezervovaná položka none[|jenkins] (žádné
-  # rulesety) na profil neodkazuje a musí být jediná.
+  # položek, odkaz na existující profil, duplicita profilu a rezervovaná
+  # položka none[|jenkins] (žádné rulesety) jediná (_gh-conf-validate-ref-items);
+  # atribut |jenkins jen v doméně s jenkins_user.
   # Použití: _gh-conf-validate-rulesets <hodnota> <rel> <domain> <errors_ref> <profiles_seen_ref> <domains_seen_ref>
-  local _value="$1" _rel="$2" _domain="$3" _rest _item _profile
-  local -A _rs_seen=()
-  declare -n _vr_profiles="$5" _vr_domains="$6"
+  local _value="$1" _rel="$2" _domain="$3" _item
+  local -a _items=()
+  declare -n _vr_domains="$6"
   _gh-conf-validate-csv "$_value" "$_GH_CONF_RULESET_ITEM_REGEX" "$_rel" rulesets "$4" || return 0
-  _rest="$_value,"
-  while [[ -n "$_rest" ]]; do
-    _item="${_rest%%,*}"
-    _rest="${_rest#*,}"
-    _profile="${_item%%|*}"
-    if [[ "$_profile" == "$_GH_CONF_NONE" ]]; then
-      [[ "$_value" == "$_item" ]] || \
-        _gh-conf-err "$4" "$_rel" "položka '$_item' v klíči 'rulesets' (žádné rulesety) musí být jediná (je '$_value')"
-    elif [[ ! -v _vr_profiles["$_profile"] ]]; then
-      _gh-conf-err "$4" "$_rel" "položka '$_item' v klíči 'rulesets' neodkazuje na existující profiles/$_profile.conf"
-    fi
-    if [[ -v _rs_seen["$_profile"] ]]; then
-      _gh-conf-err "$4" "$_rel" "duplicitní profil '$_profile' v klíči 'rulesets'"
-    fi
-    _rs_seen["$_profile"]=1
-    if [[ "$_item" == *'|jenkins' && -n "$_domain" && -v _vr_domains["$_domain"] && \
-          ! -v _GH_CONF["domains/$_domain/jenkins_user"] ]]; then
+  _gh-conf-validate-ref-items "$_value" "$_rel" rulesets "žádné rulesety" "profiles/%s.conf" profil "$4" "$5"
+  [[ -n "$_domain" && -v _vr_domains["$_domain"] && ! -v _GH_CONF["domains/$_domain/jenkins_user"] ]] || return 0
+  _gh-csv-to-array "$_value" _items
+  for _item in "${_items[@]}"; do
+    [[ "$_item" != *'|jenkins' ]] || \
       _gh-conf-err "$4" "$_rel" "položka '$_item' v klíči 'rulesets' má atribut 'jenkins', ale doména '$_domain' nemá klíč 'jenkins_user'"
-    fi
   done
   return 0
 }
@@ -349,7 +429,7 @@ _gh-conf-validate-pr-reviewers() {
     _gh-conf-err "$5" "$_rel" "klíč 'pr_reviewers_team' musí být jediný tým bez čárek (je '$_value')"
   elif [[ "$_value" == "$_GH_CONF_NONE" ]]; then
     [[ "$_allow_none" == 1 ]] || \
-      _gh-conf-err "$5" "$_rel" "hodnota '$_GH_CONF_NONE' klíče 'pr_reviewers_team' (žádný tým) je povolena jen v nastavení repa; v projektu klíč vynech"
+      _gh-conf-err-none-only-repo "$5" "$_rel" pr_reviewers_team "žádný tým"
   elif ! _gh-match "$_value" "$_GH_CONF_NAME_REGEX"; then
     _gh-conf-err "$5" "$_rel" "nevalidní slug týmu '$_value' v klíči 'pr_reviewers_team'"
   else
@@ -363,8 +443,9 @@ _gh-conf-validate-pr-reviewers() {
 }
 
 _gh-conf-validate-project() {
-  # Zvaliduje projects/<key>.conf: povinné klíče, neznámé klíče, odkazy, formáty.
-  # Použití: _gh-conf-validate-project <key> <errors_ref> <profiles_seen_ref> <domains_seen_ref>
+  # Zvaliduje projects/<key>.conf: povinné klíče, neznámé klíče, odkazy, formáty
+  # (vč. workflows proti šablonám a příznaků repa).
+  # Použití: _gh-conf-validate-project <key> <errors_ref> <profiles_seen_ref> <domains_seen_ref> <workflows_seen_ref>
   local _pk="$1" _rel="projects/$1.conf" _field _value _domain
   declare -n _vp_domains="$4"
   for _field in $_GH_CONF_PROJECT_FIELDS; do
@@ -384,6 +465,8 @@ _gh-conf-validate-project() {
   _value="${_GH_CONF[projects/$_pk/webhook_url]:-}"
   _gh-conf-validate-webhook "$_value" "${_GH_CONF[projects/$_pk/webhook_events]:-}" \
     "$_rel" 0 "$_value" "$2"
+  _gh-conf-validate-workflows "${_GH_CONF[projects/$_pk/workflows]:-}" "$_rel" 0 "$2" "$5"
+  _gh-conf-validate-repo-flags "projects/$_pk" "$_rel" "$2"
   _domain="${_GH_CONF[projects/$_pk/domain]:-}"
   if [[ -n "$_domain" ]]; then
     if ! _gh-match "$_domain" "$_GH_CONF_DOMAIN_REF_REGEX"; then
@@ -439,7 +522,7 @@ _gh-conf-validate-webhook() {
   local _url="$1" _events="$2" _rel="$3" _allow_none="$4" _effective="$5"
   if [[ "$_url" == "$_GH_CONF_NONE" ]]; then
     [[ "$_allow_none" == 1 ]] || \
-      _gh-conf-err "$6" "$_rel" "hodnota '$_GH_CONF_NONE' klíče 'webhook_url' (žádný spravovaný webhook) je povolena jen v nastavení repa; v projektu klíč vynech"
+      _gh-conf-err-none-only-repo "$6" "$_rel" webhook_url "žádný spravovaný webhook"
   elif [[ -n "$_url" ]] && ! _gh-match "$_url" "$_GH_WEBHOOK_URL_REGEX"; then
     _gh-conf-err "$6" "$_rel" "klíč 'webhook_url' má neplatnou URL '$_url' (povolený formát: $_GH_WEBHOOK_URL_REGEX)"
   fi
@@ -456,21 +539,52 @@ _gh-conf-validate-webhook() {
   return 0
 }
 
+_gh-conf-validate-workflows() {
+  # Zvaliduje hodnotu klíče workflows (defs/defs.md, workflow repa) projektu
+  # i nastavení repa: CSV názvů šablon dle _GH_CONF_TEMPLATE_NAME_REGEX, odkaz
+  # na existující workflows/<název>.yml, bez duplicit, none jediná
+  # (_gh-conf-validate-ref-items); samotné none jen s <allow_none>=1
+  # (nastavení repa). Prázdná hodnota = klíč chybí (prázdný přítomný klíč
+  # hlásí volající).
+  # Použití: _gh-conf-validate-workflows <hodnota> <rel> <allow_none 0|1> <errors_ref> <workflows_seen_ref>
+  local _value="$1" _rel="$2"
+  [[ -n "$_value" ]] || return 0
+  if [[ "$_value" == "$_GH_CONF_NONE" ]]; then
+    [[ "$3" == 1 ]] || _gh-conf-err-none-only-repo "$4" "$_rel" workflows "žádné spravované workflow"
+    return 0
+  fi
+  _gh-conf-validate-csv "$_value" "$_GH_CONF_TEMPLATE_NAME_REGEX" "$_rel" workflows "$4" || return 0
+  _gh-conf-validate-ref-items "$_value" "$_rel" workflows "žádné spravované workflow" "workflows/%s.yml" šablona "$4" "$5"
+  return 0
+}
+
+_gh-conf-validate-repo-flags() {
+  # Zvaliduje příznaky repa _GH_CONF_REPO_FLAG_FIELDS (defs/defs.md, priznaky
+  # repa) pod prefixem <ns/název> projektu i nastavení repa: přítomný
+  # neprázdný klíč musí být true|false (prázdný přítomný klíč hlásí volající).
+  # Použití: _gh-conf-validate-repo-flags <ns/název> <rel> <errors_ref>
+  local _prefix="$1" _rel="$2" _field
+  for _field in $_GH_CONF_REPO_FLAG_FIELDS; do
+    [[ -z "${_GH_CONF[$_prefix/$_field]:-}" ]] || \
+      _gh-conf-validate-bool "${_GH_CONF[$_prefix/$_field]}" "$_rel" "$_field" "$3"
+  done
+  return 0
+}
+
 _gh-conf-validate-teams-add() {
   # Zvaliduje repository_teams_add nastavení repa (defs/defs.md): formát
   # položek jako repository_teams, zákaz ghOrgSecurityManagersTeam, tým už
   # v repository_teams projektu (klíč jen přidává; redundance skrývá záměr),
   # duplicita v klíči.
   # Použití: _gh-conf-validate-teams-add <hodnota> <project_teams_csv> <rel> <errors_ref>
-  local _value="$1" _project=",$2," _rel="$3" _rest _item _slug
+  local _value="$1" _project=",$2," _rel="$3" _item _slug
+  local -a _items=()
   local -A _seen=()
   _gh-conf-validate-csv "$_value" "$_GH_CONF_TEAM_REGEX" "$_rel" repository_teams_add "$4" || return 0
   [[ ",$_value," != *",${GH_SECURITY_MANAGERS_TEAM}|"* ]] || \
     _gh-conf-err "$4" "$_rel" "repository_teams_add obsahuje tým '${GH_SECURITY_MANAGERS_TEAM}' — je implicitní součástí politiky a nekonfiguruje se"
-  _rest="$_value,"
-  while [[ -n "$_rest" ]]; do
-    _item="${_rest%%,*}"
-    _rest="${_rest#*,}"
+  _gh-csv-to-array "$_value" _items
+  for _item in "${_items[@]}"; do
     _slug="${_item%%|*}"
     if [[ "$_project" == *",$_slug|"* ]]; then
       _gh-conf-err "$4" "$_rel" "tým '$_slug' v klíči 'repository_teams_add' je už v repository_teams projektu (týmy projektu platí pro každé repo, klíč jen přidává)"
@@ -487,9 +601,10 @@ _gh-conf-validate-repo() {
   # aspoň jeden klíč, jen klíče _GH_CONF_REPO_FIELDS s neprázdnou hodnotou;
   # rulesets stejnými pravidly jako projekt (doména projektu),
   # repository_teams_add viz _gh-conf-validate-teams-add, pr_reviewers_team
-  # proti efektivním týmům repa s povolenou hodnotou none. Projekt je v této
+  # proti efektivním týmům repa s povolenou hodnotou none, workflows proti
+  # šablonám s povolenou hodnotou none, příznaky repa bool. Projekt je v této
   # chvíli už zvalidovaný.
-  # Použití: _gh-conf-validate-repo <key> <ghName> <errors_ref> <profiles_seen_ref> <domains_seen_ref>
+  # Použití: _gh-conf-validate-repo <key> <ghName> <errors_ref> <profiles_seen_ref> <domains_seen_ref> <workflows_seen_ref>
   local _pk="$1" _gh_name="$2" _rel="projects/$1/$2.conf" _prefix="repos/$1/$2"
   local _field _value _teams _wh_url
   if [[ -z "${_GH_CONF_KEYS[$_prefix]:-}" ]]; then
@@ -525,6 +640,8 @@ _gh-conf-validate-repo() {
   fi
   _gh-conf-validate-webhook "$_value" "${_GH_CONF[$_prefix/webhook_events]:-}" \
     "$_rel" 1 "$_wh_url" "$3"
+  _gh-conf-validate-workflows "${_GH_CONF[$_prefix/workflows]:-}" "$_rel" 1 "$3" "$6"
+  _gh-conf-validate-repo-flags "$_prefix" "$_rel" "$3"
   return 0
 }
 
@@ -547,35 +664,53 @@ _gh-conf-repo-settings-keys() {
 
 _gh-conf-effective() {
   # Naplní nameref efektivní hodnotou klíče repa (defs/defs.md, nastavení
-  # repa): rulesets, pr_reviewers_team, default_branch, webhook_url
-  # a webhook_events = hodnota nastavení repa, jinak projektu
-  # (pr_reviewers_team=none / webhook_url=none → prázdný řetězec = žádný tým /
-  # žádný spravovaný webhook; webhook_events bez hodnoty zůstává prázdné –
-  # default doplňuje _gh-conf-webhook);
+  # repa): rulesets, pr_reviewers_team, default_branch, webhook_url,
+  # webhook_events, workflows, allow_auto_merge a actions_create_pr = hodnota
+  # nastavení repa, jinak projektu (pr_reviewers_team=none / webhook_url=none /
+  # workflows=none → prázdný řetězec = žádný tým / žádný spravovaný webhook /
+  # žádné spravované workflow; webhook_events bez hodnoty zůstává prázdné –
+  # default doplňuje _gh-conf-webhook; příznak repa bez hodnoty = nečte se);
   # repository_teams = CSV projektu + repository_teams_add (bez dedup —
   # překryv zakazuje validátor); ostatní pole = hodnota projektu. Prázdný
   # <ghName> = hodnota projektu (projektové výpisy, admin tým projektu).
   # Volitelný <ns> = prefix namespace historické verze: klíče se skládají
   # jako <ns>/projects/<key>/<pole> a <ns>/repos/<key>/<ghName>/<pole>.
-  # Jen builtiny, žádný fork.
-  # Použití: _gh-conf-effective <key> <ghName> <pole> <out_ref> [ns]
-  local _key="$1" _gh_name="$2" _field="$3" _ns="${5:-}" _r _add
+  # Volitelný <source_ref> dostane zdroj hodnoty: repo (klíč v nastavení repa),
+  # repo_none (nastavení repa má none → hodnota prázdná), project (hodnota
+  # projektu neprázdná; i repository_teams rozšířené o repository_teams_add),
+  # none (nikde) — jediné místo priority nastavení repa > projekt pro klientské
+  # výpisy (gh-new, gh-project-info) i governance moduly; obálky
+  # _gh-conf-webhook, _gh-conf-default-branch, _gh-conf-workflows
+  # a _gh-conf-repo-flag jen pojmenovávají pole. Jen builtiny, žádný fork.
+  # Použití: _gh-conf-effective <key> <ghName> <pole> <out_ref> [ns] [source_ref]
+  local _key="$1" _gh_name="$2" _field="$3" _ns="${5:-}" _r _add _src=none
   declare -n _ce_out="$4"
   _ce_out="${_GH_CONF[${_ns:+$_ns/}projects/$_key/$_field]:-}"
-  [[ -n "$_gh_name" ]] || return 0
+  [[ -z "$_ce_out" ]] || _src=project
   _r="${_ns:+$_ns/}repos/$_key/$_gh_name"
-  case "$_field" in
-    repository_teams)
-      _add="${_GH_CONF[$_r/repository_teams_add]:-}"
-      [[ -z "$_add" ]] || _ce_out+="${_ce_out:+,}$_add"
-      ;;
-    rulesets|pr_reviewers_team|default_branch|webhook_url|webhook_events)
-      [[ -v _GH_CONF["$_r/$_field"] ]] || return 0
-      _ce_out="${_GH_CONF[$_r/$_field]}"
-      [[ "$_field" == pr_reviewers_team || "$_field" == webhook_url ]] && \
-        [[ "$_ce_out" == "$_GH_CONF_NONE" ]] && _ce_out=""
-      ;;
-  esac
+  if [[ -n "$_gh_name" ]]; then
+    case "$_field" in
+      repository_teams)
+        _add="${_GH_CONF[$_r/repository_teams_add]:-}"
+        [[ -z "$_add" ]] || _ce_out+="${_ce_out:+,}$_add"
+        ;;
+      rulesets|pr_reviewers_team|default_branch|webhook_url|webhook_events|workflows|allow_auto_merge|actions_create_pr)
+        if [[ -v _GH_CONF["$_r/$_field"] ]]; then
+          _ce_out="${_GH_CONF[$_r/$_field]}"
+          _src=repo
+          if [[ "$_field" == pr_reviewers_team || "$_field" == webhook_url || "$_field" == workflows ]] && \
+             [[ "$_ce_out" == "$_GH_CONF_NONE" ]]; then
+            _ce_out=""
+            _src=repo_none
+          fi
+        fi
+        ;;
+    esac
+  fi
+  if [[ -n "${6:-}" ]]; then
+    declare -n _ce_src="$6"
+    _ce_src="$_src"
+  fi
   return 0
 }
 
@@ -583,51 +718,75 @@ _gh-conf-webhook() {
   # Efektivní spravovaný webhook repa (defs/defs.md, webhook repa) a jeho
   # zdroj: <url_ref> = efektivní webhook_url (prázdná = žádný spravovaný
   # webhook), <events_ref> = efektivní webhook_events, bez klíče
-  # GH_WEBHOOK_EVENTS_DEFAULT (prázdné, když není URL), <source_ref> = repo
-  # (nastavení repa) | repo_none (nastavení repa má none) | project | none
-  # (projekt klíč nemá). Offline nad _GH_CONF, hodnoty nevaliduje (prošly
-  # parserem). Jedno místo priority nastavení repa > projekt — používá klient
-  # gh-new, gh-project-info i governance modul webhooků.
+  # GH_WEBHOOK_EVENTS_DEFAULT (prázdné, když není URL), <source_ref> = repo |
+  # repo_none (nastavení repa má none) | project | none — _gh-conf-effective
+  # se zdrojem. Používá klient gh-new, gh-project-info i governance modul
+  # webhooků.
   # Použití: _gh-conf-webhook <key> <ghName> <url_ref> <events_ref> <source_ref>
-  declare -n _cw_url="$3" _cw_events="$4" _cw_source="$5"
-  local _r="repos/$1/$2"
-  _cw_url=""; _cw_events=""; _cw_source=none
-  if [[ -n "$2" && -v _GH_CONF["$_r/webhook_url"] ]]; then
-    if [[ "${_GH_CONF[$_r/webhook_url]}" == "$_GH_CONF_NONE" ]]; then
-      _cw_source=repo_none
-      return 0
-    fi
-    _cw_url="${_GH_CONF[$_r/webhook_url]}"
-    _cw_source=repo
-  elif [[ -n "${_GH_CONF[projects/$1/webhook_url]:-}" ]]; then
-    _cw_url="${_GH_CONF[projects/$1/webhook_url]}"
-    _cw_source=project
-  else
-    return 0
-  fi
-  _gh-conf-effective "$1" "$2" webhook_events _cw_events
+  declare -n _cw_url="$3" _cw_events="$4"
+  _gh-conf-effective "$1" "$2" webhook_url "$3" "" "$5"
+  _cw_events=""
+  [[ -n "$_cw_url" ]] || return 0
+  _gh-conf-effective "$1" "$2" webhook_events "$4"
   [[ -n "$_cw_events" ]] || _cw_events="${GH_WEBHOOK_EVENTS_DEFAULT:-push}"
   return 0
 }
 
 _gh-conf-default-branch() {
   # Cílová výchozí větev nově zakládaného repa (defs/defs.md, default_branch)
-  # a její zdroj: <source_ref> = repo (nastavení repa) | project | none;
-  # <value_ref> = jméno větve, při none prázdné. Offline nad _GH_CONF,
-  # hodnoty nevaliduje (prošly parserem). Jedno místo priority nastavení
-  # repa > projekt > nezasahovat — používá klient gh-new i workflow.
+  # a její zdroj repo | project | none (při none prázdná hodnota) —
+  # _gh-conf-effective se zdrojem. Používá klient gh-new i workflow
+  # new-repository.
   # Použití: _gh-conf-default-branch <key> <ghName> <value_ref> <source_ref>
-  declare -n _cdb_value="$3" _cdb_source="$4"
-  if [[ -v _GH_CONF["repos/$1/$2/default_branch"] ]]; then
-    _cdb_value="${_GH_CONF[repos/$1/$2/default_branch]}"
-    _cdb_source=repo
-  elif [[ -n "${_GH_CONF[projects/$1/default_branch]:-}" ]]; then
-    _cdb_value="${_GH_CONF[projects/$1/default_branch]}"
-    _cdb_source=project
-  else
-    _cdb_value=""
-    _cdb_source=none
+  _gh-conf-effective "$1" "$2" default_branch "$3" "" "$4"
+}
+
+_gh-conf-workflows() {
+  # Efektivní klíč workflows repa (defs/defs.md, workflow repa) a jeho zdroj:
+  # <csv_ref> = CSV názvů šablon (prázdné = žádné spravované workflow),
+  # <source_ref> = repo | repo_none (nastavení repa má none) | project | none —
+  # _gh-conf-effective se zdrojem. Používá klient gh-new, gh-project-info
+  # i governance modul workflows.
+  # Použití: _gh-conf-workflows <key> <ghName> <csv_ref> <source_ref>
+  _gh-conf-effective "$1" "$2" workflows "$3" "" "$4"
+}
+
+_gh-conf-repo-flag() {
+  # Efektivní hodnota příznaku repa (defs/defs.md, priznaky repa) a její zdroj:
+  # <value_ref> = true | false | prázdné (klíč nikde nezadán = governance
+  # příznak nečte ani nemění), <source_ref> = repo | project | none —
+  # _gh-conf-effective se zdrojem. Neznámý <příznak> (mimo
+  # _GH_CONF_REPO_FLAG_FIELDS) = chyba volajícího, rc 1.
+  # Použití: _gh-conf-repo-flag <key> <ghName> <příznak> <value_ref> <source_ref>
+  if [[ " $_GH_CONF_REPO_FLAG_FIELDS " != *" $3 "* ]]; then
+    echo "Chyba: _gh-conf-repo-flag: neznámý příznak repa '$3' (povoleny: ${_GH_CONF_REPO_FLAG_FIELDS// /, })." >&2
+    return 1
   fi
+  _gh-conf-effective "$1" "$2" "$3" "$4" "" "$5"
+}
+
+_gh-conf-projects-using-workflow() {
+  # Naplní nameref pole ghProjectKey projektů, jejichž klíč workflows (projektu)
+  # nebo kterékoli nastavení repa šablonu <název> obsahuje — dotčené projekty
+  # pushe měnícího conf.d/workflows/<název>.yml (workflow repo-sync,
+  # defs/defs-governance-repo.md). Každý projekt jednou, řazení LC_ALL=C
+  # (builtiny + sort; běží za běhu workflow, ne v load path). Offline nad
+  # _GH_CONF.
+  # Použití: _gh-conf-projects-using-workflow <název> <array_ref>
+  declare -n _puw_out="$2"
+  local _name="$1" _key _rs _line
+  local -A _puw_seen=()
+  _puw_out=()
+  for _key in "${_GH_CONF_PROJECT_KEYS[@]}"; do
+    [[ ",${_GH_CONF[projects/$_key/workflows]:-}," == *",$_name,"* ]] && _puw_seen["$_key"]=1
+  done
+  for _rs in "${_GH_CONF_REPO_SETTINGS[@]}"; do
+    [[ ",${_GH_CONF[repos/$_rs/workflows]:-}," == *",$_name,"* ]] && _puw_seen["${_rs%%/*}"]=1
+  done
+  [[ ${#_puw_seen[@]} -gt 0 ]] || return 0
+  while IFS= read -r _line; do
+    [[ -z "$_line" ]] || _puw_out+=("$_line")
+  done < <(printf '%s\n' "${!_puw_seen[@]}" | LC_ALL=C sort)
   return 0
 }
 
@@ -652,13 +811,16 @@ _gh-conf-reserved-project-key() {
 
 _gh-conf-validate-all() {
   # Zvaliduje načtená data všech namespace v pořadí závislostí: profily
-  # (vč. rezervovaného jména none), business services, domény, projekty
-  # (vč. rezervovaného projectKey) a nastavení rep; chyby sbírá do nameref.
-  # Použití: _gh-conf-validate-all <errors_ref> <profiles_seen_ref> <bs_seen_ref> <domains_seen_ref>
+  # (vč. rezervovaného jména none), šablony workflow (rezervované jméno none),
+  # business services, domény, projekty (vč. rezervovaného projectKey)
+  # a nastavení rep; chyby sbírá do nameref.
+  # Použití: _gh-conf-validate-all <errors_ref> <profiles_seen_ref> <bs_seen_ref> <domains_seen_ref> <workflows_seen_ref>
   local _name _reserved
-  declare -n _va_errors="$1" _va_profiles="$2" _va_bs="$3" _va_domains="$4"
+  declare -n _va_errors="$1" _va_profiles="$2" _va_bs="$3" _va_domains="$4" _va_workflows="$5"
   [[ ! -v _va_profiles["$_GH_CONF_NONE"] ]] || _gh-conf-err "$1" "profiles/$_GH_CONF_NONE.conf" \
     "název profilu '$_GH_CONF_NONE' je rezervovaný (rulesets=$_GH_CONF_NONE znamená žádné rulesety)"
+  [[ ! -v _va_workflows["$_GH_CONF_NONE"] ]] || _gh-conf-err "$1" "workflows/$_GH_CONF_NONE.yml" \
+    "název šablony '$_GH_CONF_NONE' je rezervovaný (workflows=$_GH_CONF_NONE v nastavení repa znamená žádné spravované workflow)"
   for _name in "${!_va_profiles[@]}"; do
     _gh-conf-validate-profile "$_name" "$1"
   done
@@ -674,10 +836,10 @@ _gh-conf-validate-all() {
       _gh-conf-err "$1" "projects/$_name.conf" \
         "projectKey '$_name' je rezervovaný — kolize s gov repem '$GH_GOVERNANCE_REPO'"
     fi
-    _gh-conf-validate-project "$_name" "$1" "$2" "$4"
+    _gh-conf-validate-project "$_name" "$1" "$2" "$4" "$5"
   done
   for _name in "${_GH_CONF_REPO_SETTINGS[@]}"; do
-    _gh-conf-validate-repo "${_name%%/*}" "${_name#*/}" "$1" "$2" "$4"
+    _gh-conf-validate-repo "${_name%%/*}" "${_name#*/}" "$1" "$2" "$4" "$5"
   done
   [[ ${#_GH_CONF_PROJECT_KEYS[@]} -gt 0 ]] || \
     _va_errors+=("Chyba: conf.d/projects/ neobsahuje žádný soubor <ghProjectKey>.conf")
@@ -694,18 +856,19 @@ _gh-conf-load() {
   # Použití: _gh-conf-load <confd_root>
   local _root="$1"
   local -a _errors=()
-  local -A _profiles_seen=() _bs_seen=() _domains_seen=() _projects_seen=()
+  local -A _profiles_seen=() _bs_seen=() _domains_seen=() _projects_seen=() _workflows_seen=()
   _GH_CONF=()
   _GH_CONF_KEYS=()
   _GH_CONF_PROJECT_KEYS=()
   _GH_CONF_REPO_SETTINGS=()
   unset _GH_CONF_DATA_LOADED _GH_CONF_LOADED_SHA
-  _gh-conf-load-ns "$_root" profiles '^[a-z][a-z0-9_-]*$' _errors _profiles_seen
+  _gh-conf-load-ns "$_root" profiles "$_GH_CONF_TEMPLATE_NAME_REGEX" _errors _profiles_seen
+  _gh-conf-load-workflows "$_root" _errors _workflows_seen
   _gh-conf-load-ns "$_root" business-services '^[A-Z][A-Z0-9]*$' _errors _bs_seen
   _gh-conf-load-domains "$_root" _errors _domains_seen
   _gh-conf-load-ns "$_root" projects '^[a-z0-9]{1,46}$' _errors _projects_seen
   _gh-conf-load-repos "$_root" _errors _projects_seen
-  _gh-conf-validate-all _errors _profiles_seen _bs_seen _domains_seen
+  _gh-conf-validate-all _errors _profiles_seen _bs_seen _domains_seen _workflows_seen
   if [[ ${#_errors[@]} -gt 0 ]]; then
     printf '%s\n' "${_errors[@]}" >&2
     printf 'Konfigurace conf.d nebyla načtena (chyb: %d).\n' "${#_errors[@]}" >&2

@@ -20,10 +20,13 @@ nastavení, aniž by cokoli musel kdokoli nastavovat ručně:
   skutečný stav repozitářů s konfigurací, drift opravuje a odchylky hlásí
   v issue `reconcile-report`. Hlídá i pull requesty: u otevřeného PR bez
   žádosti o review požádá tým projektu (`pr_reviewers_team`) a projekt bez
-  tohoto týmu hlásí. Soubor `CODEOWNERS` (automatické žádosti o review)
-  a webhook do CI/CD (klíč `webhook_url` projektu) zapisuje automatika už
-  při založení, obnovení, přesunu či přejmenování repa a po každé změně
-  konfigurace projektu (workflow `repo-sync`); denní kontrola je pojistkou.
+  tohoto týmu hlásí. Soubor `CODEOWNERS` (automatické žádosti o review),
+  webhook do CI/CD (klíč `webhook_url` projektu), soubory workflow ze šablon
+  (klíč `workflows`; `.github/workflows/mh-workflow-*.yml` s hlavičkou
+  `GENEROVANO`) a příznaky repa (`allow_auto_merge`, `actions_create_pr`)
+  zapisuje automatika už při založení, obnovení, přesunu či přejmenování
+  repa a po každé změně konfigurace projektu nebo šablony (workflow
+  `repo-sync`); denní kontrola je pojistkou.
 - **Migrace z Bitbucketu** — repozitáře se z Bitbucket Serveru přenášejí
   nástroji `bb-*` podle jmenné konvence `czmh-icc-<projekt>-<jméno>`
   a rovnou podléhají výše uvedeným pravidlům.
@@ -32,8 +35,9 @@ nastavení, aniž by cokoli musel kdokoli nastavovat ručně:
 
 - `conf.d/` — **jediné místo pravdy** konfigurace: projekty, nastavení
   jednotlivých rep (`projects/<projekt>/<repo>.conf` — jiná ochrana větví
-  nebo týmy navíc pro jedno repo), business services, domény a profily
-  ochrany větví; mění se výhradně pull requestem,
+  nebo týmy navíc pro jedno repo), business services, domény, profily
+  ochrany větví a šablony workflow rep (`workflows/<název>.yml`); mění se
+  výhradně pull requestem,
 - `state/` — stavové soubory automatiky; zapisuje výhradně governance bot,
 - `splits/` — mapy hromadného rozdělení projektů (schvalované pull requestem),
 - `.github/workflows/`, `bin/`, `lib/` — kód automatiky; nasazuje se sem

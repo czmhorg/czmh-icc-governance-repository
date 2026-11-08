@@ -1,11 +1,13 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
-# Workflow repo-sync: cílená distribuce nastavení obsahu a webhooku pro
-# jeden projekt (defs/defs-governance-repo.md, repo-sync issue; do 2026-09-24
-# codeowners-sync). Provede nad nearchivovanými spravovanými repy projektu
-# tutéž správu .github/CODEOWNERS a CODEOWNERS_README.md (pr_reviewers_team)
-# a webhooku (webhook_url, webhook_events) jako daily-reconcile a nic jiného;
-# daily-reconcile zůstává pojistkou (repa v migraci, změny šablon, selhané
-# zápisy).
+# Workflow repo-sync: cílená distribuce nastavení obsahu, webhooku, souborů
+# workflow a příznaků repa pro jeden projekt (defs/defs-governance-repo.md,
+# repo-sync issue; do 2026-09-24 codeowners-sync). Provede nad nearchivovanými
+# spravovanými repy projektu tutéž správu .github/CODEOWNERS
+# a CODEOWNERS_README.md (pr_reviewers_team), webhooku (webhook_url,
+# webhook_events), souborů .github/workflows/<prefix>-*.yml (klíč workflows)
+# a příznaků repa (allow_auto_merge, actions_create_pr) jako daily-reconcile
+# a nic jiného; daily-reconcile zůstává pojistkou (repa v migraci, selhané
+# zápisy, osiřelé soubory po smazané šabloně).
 # Dva triggery:
 #   - workflow_call z dispatcheru issue-dispatch.yml (governance issue
 #     s prefixem titulku `repo-sync: `, tělo project_key=<key>; joby běží
@@ -14,11 +16,12 @@
 #     dostává zvalidované hodnoty přes env. Bez autorizace autora (jako track-delete)
 #     – sync jen konverguje repa k conf.d. Issue se vždy zavře completed
 #     s reportem v komentáři; rc 1 při error položce (viditelnost na běhu).
-#   - push do conf.d/projects/** ve výchozí větvi gov repa: dotčené projekty
-#     se odvodí z cest změněných souborů (before..HEAD, HEAD = aktuální
-#     výchozí větev, ne commit pushe); neznámý/nulový before = všechny
-#     projekty. Report jen do souhrnu běhu. Změna webhook_url se tak projeví
-#     hned po merge.
+#   - push do conf.d/projects/** nebo conf.d/workflows/** ve výchozí větvi
+#     gov repa: dotčené projekty se odvodí z cest změněných souborů
+#     (before..HEAD, HEAD = aktuální výchozí větev, ne commit pushe; změněná
+#     šablona → projekty, jejichž klíč workflows ji odkazuje); neznámý/nulový
+#     before = všechny projekty. Report jen do souhrnu běhu. Změna webhook_url
+#     nebo šablony workflow se tak projeví hned po merge.
 # Concurrency: issue běhy per projekt (group repo-sync-<key>); push běhy
 # každý vlastní skupinu (github.sha) – ve skupině je nejvýš 1 running +
 # 1 pending a nový příchozí pending zruší (docs/github/actions-concurrency.md),
@@ -37,7 +40,7 @@ name: repo-sync
 on:
   workflow_call:
   push:
-    paths: ['conf.d/projects/**']
+    paths: ['conf.d/projects/**', 'conf.d/workflows/**']
 
 permissions:
   contents: read
@@ -84,7 +87,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           token: ${{ secrets.GOV_BOT_TOKEN }}
-      - name: Repo-sync (CODEOWNERS a webhook)
+      - name: Repo-sync (CODEOWNERS, webhook, workflow a příznaky repa)
         env:
           GH_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}
           GH_ENTERPRISE_TOKEN: ${{ secrets.GOV_BOT_TOKEN }}

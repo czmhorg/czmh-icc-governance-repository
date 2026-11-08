@@ -12,6 +12,8 @@
 # gov-sync.sh před pushem kódu, gov-init.sh týmž voláním (deploy je v initu
 # volitelný) a denní reconcile chybějící label hlásí (warning `chybejici label
 # gov repa`).
+# Popis labelu smí mít nejvýše 100 znaků, delší GitHub odmítne HTTP 422
+# (docs/github/label-description-limit.md; hlídá tests/test-gh-governance-labels.sh).
 # Závislosti: gh-common-defs.sh (GITHUB_ORG_HOSTNAME); gh label list/create
 # vyžadují write do gov repa.
 [[ -n "${_GH_GOVERNANCE_LABELS_LOADED:-}" ]] && \
@@ -32,7 +34,7 @@ declare -A _GH_GOVERNANCE_LABELS=(
   [move-repo]="Požadavek na přesun repozitáře do jiného projektu (workflow move-repository)"
   [rename-repo]="Požadavek na přejmenování repozitáře v projektu (workflow rename-repository)"
   [track-delete]="Sledování smazání repozitáře (workflow track-delete)"
-  [repo-sync]="Požadavek na distribuci CODEOWNERS a webhooku do rep projektu (workflow repo-sync)"
+  [repo-sync]="Distribuce CODEOWNERS, webhooku, workflow a příznaků repa do rep projektu (workflow repo-sync)"
   [reconcile-report]="Denní reconcile report (workflow daily-reconcile)"
 )
 

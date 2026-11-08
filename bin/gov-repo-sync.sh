@@ -14,8 +14,10 @@ if [[ "${1:-}" == "--help" ]]; then
   echo "         gov-repo-sync.sh --push <beforeSha>"
   echo "Účel:    Repo-sync projektu: nad nearchivovanými spravovanými repy projektu"
   echo "         provede tutéž správu .github/CODEOWNERS a CODEOWNERS_README.md"
-  echo "         (klíč pr_reviewers_team) a webhooku (klíče webhook_url,"
-  echo "         webhook_events) jako daily-reconcile a nic jiného. Report do"
+  echo "         (klíč pr_reviewers_team), webhooku (klíče webhook_url,"
+  echo "         webhook_events), souborů .github/workflows/<prefix>-*.yml (klíč"
+  echo "         workflows) a příznaků repa (klíče allow_auto_merge,"
+  echo "         actions_create_pr) jako daily-reconcile a nic jiného. Report do"
   echo "         GITHUB_STEP_SUMMARY (mimo Actions na stdout)."
   echo ""
   echo "Parametry:"
@@ -31,14 +33,16 @@ if [[ "${1:-}" == "--help" ]]; then
   echo "               Odmítnutí zavře issue not_planned. Bez autorizace autora."
   echo "  --execute    Execute job workflow (issue): sync projektu, komentář"
   echo "               s reportem, zavření issue completed; rc 1 při error položce."
-  echo "  --push       Execute job workflow (push do conf.d/projects/**): projekty"
-  echo "               z cest změněných souborů beforeSha..HEAD."
+  echo "  --push       Execute job workflow (push do conf.d/projects/** nebo"
+  echo "               conf.d/workflows/**): projekty z cest změněných souborů"
+  echo "               beforeSha..HEAD (šablona → projekty, které ji odkazují)."
   echo ""
   echo "Příklad: bash governance/bin/gov-repo-sync.sh --project bbpkid"
   echo ""
   echo "Práva:   read na repech organizace (výpis, Contents API), zápis obsahu"
-  echo "         spravovaných rep (bot = bypass actor rulesetů) a jejich webhooků"
-  echo "         (admin repa), issues RW na gov repu."
+  echo "         spravovaných rep (bot = bypass actor rulesetů; soubory"
+  echo "         .github/workflows/ vyžadují scope workflow PAT), jejich webhooků"
+  echo "         a nastavení (admin repa), issues RW na gov repu."
   exit 0
 fi
 
@@ -118,7 +122,7 @@ case "$_gov_rs_mode" in
     fi
     _gov-rs-render "$_gov_rs_report"
     _gov_rs_run_url="${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}"
-    _gov_rs_comment="Repo-sync projektu '${_gov_rs_pos[0]}' (CODEOWNERS a webhook) dokončen ($(_gh-governance-report-header "$_gov_rs_report"))."
+    _gov_rs_comment="Repo-sync projektu '${_gov_rs_pos[0]}' (CODEOWNERS, webhook, workflow a příznaky repa) dokončen ($(_gh-governance-report-header "$_gov_rs_report"))."
     # Render bez souhrnu počtů (řádek 1, je v hlavičce) a prázdného řádku za ním.
     _gov_rs_comment+=$'\n\n'"$(_gh-governance-report-render "$_gov_rs_report" | tail -n +3)"
     _gov_rs_comment+=$'\n\n'"Běh workflow: $_gov_rs_run_url"
@@ -146,7 +150,7 @@ case "$_gov_rs_mode" in
     else
       _gov_rs_reason=""
       _gov_rs_paths=$(git -C "$_gov_rs_root" diff --name-only \
-        "${_gov_rs_before}..HEAD" -- conf.d/projects/) || {
+        "${_gov_rs_before}..HEAD" -- conf.d/projects/ conf.d/workflows/) || {
         echo "Chyba: git diff ${_gov_rs_before}..HEAD selhal." >&2
         exit 1
       }
@@ -162,7 +166,7 @@ case "$_gov_rs_mode" in
         "rozsah změn nelze určit: ${_gov_rs_reason} — sync běží nad všemi projekty (${#_gov_rs_keys[@]})"
     fi
     if [[ ${#_gov_rs_keys[@]} -eq 0 ]]; then
-      echo "Změny conf.d/projects/ se netýkají žádného projektu – nic k synchronizaci."
+      echo "Změny conf.d/projects/ a conf.d/workflows/ se netýkají žádného projektu – nic k synchronizaci."
       _gov-rs-render "$_gov_rs_report"
       exit 0
     fi

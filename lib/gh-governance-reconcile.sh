@@ -14,6 +14,9 @@
 # lib/gh-governance-deploy-manifest.sh (kontrola driftu kódu),
 # lib/gh-governance-codeowners.sh (správa CODEOWNERS dle pr_reviewers_team),
 # lib/gh-governance-webhooks.sh (správa webhooku dle webhook_url),
+# lib/gh-governance-workflows.sh (soubory workflow dle klíče workflows),
+# lib/gh-governance-repo-flags.sh (příznaky repa allow_auto_merge,
+# actions_create_pr), lib/gh-governance-report.sh (_gh-governance-report-tolerate),
 # lib/gh-governance-pr-review.sh (PR bez žádosti o review, projekt bez týmu),
 # lib/gh-governance-bypass-team.sh (bypass týmy bota a Jenkins loginů před
 # hlavní smyčkou: založení, členství, popis).
@@ -504,7 +507,7 @@ _gh-governance-reconcile-run() {
   # do reportu (musí být inicializován _gh-governance-report-init).
   # rc != 0 jen při selhání infrastruktury běhu (výpis rep, checkout).
   # Použití: _gh-governance-reconcile-run
-  local _listing _name _archived _branch _topics _extra _class _value _err_file
+  local _listing _name _archived _branch _topics _extra _class _value
   local _key _n _level _subset _listing_file _dead _manifest_added=0 _manifest_removed=0
   local _pointer _gh_name
   local -A _count_archived=() _count_live=()
@@ -555,32 +558,23 @@ _gh-governance-reconcile-run() {
           _pointer=$(_gh-governance-state-read "$_name" 2>/dev/null) || _pointer=""
           # ghName odříznutím z názvu (tvar garantuje klasifikace spravovane).
           _gh_name="${_name#"${GH_REPO_PREFIX}-${_key}-"}"
-          [[ ",$_topics," == *",${_BB_MIGRATION_TOPIC_MARKER},"* ]] || \
+          _bb-migration-topic-present "$_topics" "$_BB_MIGRATION_TOPIC_MARKER" || \
             _managed["$_name"]="${_key}"$'\t'"${_gh_name}"
-          _err_file=$(mktemp) || return 1
-          if ! _gh-governance-reconcile-repo "$_name" "$_branch" "$_key" "$_gh_name" 2>"$_err_file"; then
-            _gh-governance-report-add error "neuspesna reconciliace repa" \
-              "${GITHUB_ORG}/${_name}" "$(tail -n 1 "$_err_file")"
-          fi
-          rm -f "$_err_file"
-          # Správa CODEOWNERS dle pr_reviewers_team — nezávislá na výsledku
-          # reconciliace repa, vlastní tolerance selhání.
-          _err_file=$(mktemp) || return 1
-          if ! _gh-governance-reconcile-codeowners "$_name" "$_branch" "$_key" \
-              "$_topics" "$_pointer" 2>"$_err_file"; then
-            _gh-governance-report-add error "neuspesna reconciliace repa" \
-              "${GITHUB_ORG}/${_name}" "správa CODEOWNERS: $(tail -n 1 "$_err_file")"
-          fi
-          rm -f "$_err_file"
-          # Správa webhooku dle webhook_url — stejná nezávislost a tolerance
-          # selhání; stará URL dle diffu ukazatele před tímto během.
-          _err_file=$(mktemp) || return 1
-          if ! _gh-governance-reconcile-webhook "$_name" "$_key" "$_topics" "$_pointer" \
-              2>"$_err_file"; then
-            _gh-governance-report-add error "neuspesna reconciliace repa" \
-              "${GITHUB_ORG}/${_name}" "správa webhooku: $(tail -n 1 "$_err_file")"
-          fi
-          rm -f "$_err_file"
+          _gh-governance-report-tolerate "${GITHUB_ORG}/${_name}" "" \
+            _gh-governance-reconcile-repo "$_name" "$_branch" "$_key" "$_gh_name"
+          # Správa CODEOWNERS (pr_reviewers_team), webhooku (webhook_url),
+          # souborů workflow (workflows) a příznaků repa (allow_auto_merge,
+          # actions_create_pr) — každá nezávislá na výsledku reconciliace repa,
+          # s vlastní tolerancí selhání; stará URL webhooku a úroveň hlášení
+          # z ukazatele před tímto během.
+          _gh-governance-report-tolerate "${GITHUB_ORG}/${_name}" "správa CODEOWNERS" \
+            _gh-governance-reconcile-codeowners "$_name" "$_branch" "$_key" "$_topics" "$_pointer"
+          _gh-governance-report-tolerate "${GITHUB_ORG}/${_name}" "správa webhooku" \
+            _gh-governance-reconcile-webhook "$_name" "$_key" "$_topics" "$_pointer"
+          _gh-governance-report-tolerate "${GITHUB_ORG}/${_name}" "správa workflow" \
+            _gh-governance-reconcile-workflows "$_name" "$_branch" "$_key" "$_topics" "$_pointer"
+          _gh-governance-report-tolerate "${GITHUB_ORG}/${_name}" "správa příznaků repa" \
+            _gh-governance-reconcile-repo-flags "$_name" "$_key" "$_topics" "$_pointer"
         fi ;;
       zadne) ;;
     esac

@@ -19,7 +19,8 @@
 # migrace, GH_WEBHOOK_EVENTS_DEFAULT), lib/gh-conf.sh (_gh-conf-webhook),
 # lib/gh-repository-policy.sh (API helpery), lib/gh-governance-report.sh,
 # lib/gh-governance-state.sh (_gh-governance-run-sha,
-# _gh-governance-webhook-url-to-remove, _gh-governance-conf-effective-at-commit).
+# _gh-governance-webhook-urls-to-remove, _gh-governance-conf-effective-at-commit,
+# _gh-governance-conf-field-unchanged).
 [[ -n "${_GH_GOVERNANCE_WEBHOOKS_LOADED:-}" ]] && \
   declare -F _gh-governance-reconcile-webhook >/dev/null && return 0
 _GH_GOVERNANCE_WEBHOOKS_LOADED=1
@@ -43,11 +44,11 @@ _gh-governance-webhook-payload() {
   # Sestaví JSON payload hooku (POST i PATCH) z URL a CSV událostí – offline.
   # V URL escapuje uvozovky a zpětná lomítka (mezery vylučuje parser).
   # Použití: _gh-governance-webhook-payload <url> <eventsCSV>
-  local _url="$1" _rest="$2," _item _events=""
+  local _url="$1" _item _events=""
+  local -a _items=()
   _url="${_url//\\/\\\\}"; _url="${_url//\"/\\\"}"
-  while [[ -n "$_rest" ]]; do
-    _item="${_rest%%,*}"
-    _rest="${_rest#*,}"
+  _gh-csv-to-array "$2" _items
+  for _item in "${_items[@]}"; do
     [[ -n "$_item" ]] && _events+="${_events:+, }\"$_item\""
   done
   printf '{ "name": "web", "active": true, "events": [%s], "config": { "url": "%s", "content_type": "%s", "insecure_ssl": "%s" } }' \
@@ -174,13 +175,13 @@ _gh-governance-webhook-ping() {
 _gh-governance-webhook-conf-unchanged() {
   # rc 0 ⇔ efektivní webhook_url i webhook_events repa na SHA ukazatele jsou
   # shodné s aktuálními <url> <events> – heuristika „ruční zásah do hooku"
-  # (warning) vs. „legitimní změna conf.d" (info). Prázdné SHA nebo chyba
-  # čtení = neprokázáno (rc 1 → info).
+  # (warning) vs. „legitimní změna conf.d" (info). URL přes společný
+  # _gh-governance-conf-field-unchanged (lib/gh-governance-state.sh), události
+  # navíc s defaultem a normalizací. Prázdné SHA nebo chyba čtení = neprokázáno
+  # (rc 1 → info).
   # Použití: _gh-governance-webhook-conf-unchanged <sha> <key> <ghName> <url> <events>
-  local _old_url="" _old_events="" _want=""
-  [[ -n "$1" ]] || return 1
-  _gh-governance-conf-effective-at-commit "$1" "$2" "$3" webhook_url _old_url 2>/dev/null || return 1
-  [[ "$_old_url" == "$4" ]] || return 1
+  local _old_events="" _want=""
+  _gh-governance-conf-field-unchanged "$1" "$2" "$3" webhook_url "$4" || return 1
   _gh-governance-conf-effective-at-commit "$1" "$2" "$3" webhook_events _old_events 2>/dev/null || return 1
   [[ -n "$_old_events" ]] || _old_events="${GH_WEBHOOK_EVENTS_DEFAULT:-push}"
   _gh-governance-webhook-events-normalize "$_old_events" _old_events
@@ -206,7 +207,7 @@ _gh-governance-reconcile-webhook() {
   local _repo_path="${GITHUB_ORG}/${_name}" _url="" _events="" _source=""
   local _run_sha _listing _plan _action _a2 _a3 _payload _id _ping
   local -a _old_list=()
-  [[ ",$_topics," == *",${_BB_MIGRATION_TOPIC_MARKER},"* ]] && return 0
+  _bb-migration-topic-present "$_topics" "$_BB_MIGRATION_TOPIC_MARKER" && return 0
   _require_vars GITHUB_ORG GITHUB_ORG_HOSTNAME GH_REPO_PREFIX || return 1
   _gh-conf-webhook "$_key" "$_gh_name" _url _events _source
   if [[ -z "$_old_urls" && -n "$_pointer_sha" ]]; then
@@ -251,50 +252,13 @@ _gh-governance-reconcile-webhook() {
 
 _gh-governance-webhook-apply-note() {
   # Správa webhooku jednoho repa ve workflow životního cyklu (new/unarchive/
-  # move/rename): volá _gh-governance-reconcile-webhook nad dočasným reportem
-  # a jeho položky vrátí jako řádky poznámky do komentáře issue
-  # (`Webhook: <typ> – <detail>`). Poznámka je vždy neprázdná: repo v migraci
-  # → `vynecháno (repo v migraci)`, nula položek → `beze změny`, rc != 0 →
-  # `zápis selhal – <poslední řádek stderr>; dorovná denní reconcile` (stderr
-  # projde dál do logu). Selhání operaci neshodí — rc vždy 0. Předchozí
-  # _GH_GOVERNANCE_REPORT_FILE volajícího se obnoví. Vzor:
-  # _gh-governance-codeowners-apply-note.
+  # move/rename): položky reportu _gh-governance-reconcile-webhook jako řádky
+  # poznámky `Webhook: <typ> – <detail>` do komentáře issue — společné tělo
+  # _gh-governance-apply-note (lib/gh-governance-report.sh: repo v migraci →
+  # vynecháno bez volání, nula položek → beze změny, rc != 0 → zápis selhal
+  # s posledním řádkem stderr; rc vždy 0, report volajícího se obnoví).
   # Použití: _gh-governance-webhook-apply-note <repoName> <projectKey>
   #          <topicsCSV> <pointer_sha|''> <note_ref> [old_url]
-  declare -n _wn_ref="$5"
-  local _wn_prev_set=0 _wn_prev="" _wn_tmp _wn_err _wn_rc=0 _wn_n=0
-  local _wn_level _wn_type _wn_repo _wn_detail
-  _wn_ref=""
-  if [[ ",$3," == *",${_BB_MIGRATION_TOPIC_MARKER},"* ]]; then
-    _wn_ref="Webhook: vynecháno (repo v migraci)"
-    return 0
-  fi
-  if [[ -v _GH_GOVERNANCE_REPORT_FILE ]]; then
-    _wn_prev_set=1
-    _wn_prev="$_GH_GOVERNANCE_REPORT_FILE"
-  fi
-  if ! _wn_tmp=$(mktemp) || ! _wn_err=$(mktemp); then
-    _wn_ref="Webhook: zápis selhal – mktemp selhal; dorovná denní reconcile"
-    return 0
-  fi
-  _gh-governance-report-init "$_wn_tmp"
-  _gh-governance-reconcile-webhook "$1" "$2" "$3" "$4" "${6:-}" 2>"$_wn_err" || _wn_rc=$?
-  if [[ $_wn_prev_set -eq 1 ]]; then
-    _GH_GOVERNANCE_REPORT_FILE="$_wn_prev"
-  else
-    unset _GH_GOVERNANCE_REPORT_FILE
-  fi
-  [[ -s "$_wn_err" ]] && cat "$_wn_err" >&2
-  while IFS=$'\t' read -r _wn_level _wn_type _wn_repo _wn_detail; do
-    [[ -n "$_wn_level" ]] || continue
-    _wn_ref+="${_wn_ref:+$'\n'}Webhook: ${_wn_type} – ${_wn_detail}"
-    _wn_n=$(( _wn_n + 1 ))
-  done < "$_wn_tmp"
-  if [[ $_wn_rc -ne 0 ]]; then
-    _wn_ref+="${_wn_ref:+$'\n'}Webhook: zápis selhal – $(tail -n 1 "$_wn_err"); dorovná denní reconcile"
-  elif [[ $_wn_n -eq 0 ]]; then
-    _wn_ref="Webhook: beze změny"
-  fi
-  rm -f "$_wn_tmp" "$_wn_err"
-  return 0
+  _gh-governance-apply-note "Webhook" "$5" "$3" \
+    _gh-governance-reconcile-webhook "$1" "$2" "$3" "$4" "${6:-}"
 }

@@ -6,16 +6,17 @@
 # projektu (rename-repository; návrh docs/implementovano/navrh/gh-rename.md) jedním
 # orchestrátorem nad dvojicemi (srcKey, srcName) → (dstKey, dstName): řízené
 # přejmenování + přepnutí topicu ghp-* (jen přesun) + aplikace efektivní
-# politiky cílové dvojice + zápis CODEOWNERS pod novým jménem + přesun
-# ukazatele state/ a řádku completion manifestu; volitelné zrušení GitHub
-# redirectu starého jména dočasným repem
-# (ověřené chování: docs/github/rename-redirect-obsazeni-jmena.md).
+# politiky cílové dvojice + zápis CODEOWNERS, webhooku, souborů workflow
+# a příznaků repa pod novým jménem + přesun ukazatele state/ a řádku
+# completion manifestu; volitelné zrušení GitHub redirectu starého jména
+# dočasným repem (ověřené chování: docs/github/rename-redirect-obsazeni-jmena.md).
 # Závislosti: gh-common-defs.sh, lib/gh-conf.sh, lib/gh-repository-policy.sh,
 # lib/gh-governance-state.sh (_gh-governance-*-to-remove-between),
 # lib/gh-governance-manifest.sh, lib/gh-governance-repo-ops.sh,
 # lib/gh-governance-reconcile.sh (GH_GOVERNANCE_CAPACITY_MAX),
-# lib/gh-governance-codeowners.sh (_gh-governance-codeowners-apply-note –
-# zápis CODEOWNERS pod novým jménem po politice cílové dvojice).
+# lib/gh-governance-codeowners.sh, lib/gh-governance-webhooks.sh,
+# lib/gh-governance-workflows.sh, lib/gh-governance-repo-flags.sh
+# (*-apply-note – zápis pod novým jménem po politice cílové dvojice).
 [[ -n "${_GH_GOVERNANCE_MOVE_LOADED:-}" ]] && \
   declare -F _gh-governance-move-run >/dev/null && return 0
 _GH_GOVERNANCE_MOVE_LOADED=1
@@ -377,23 +378,23 @@ _gh-governance-move-run() {
   # a split-project; dstName == srcName) i přejmenování repa uvnitř projektu
   # (workflow rename-repository; dstKey == srcKey). Kroky dle návrhů:
   # validace → (dearchivace) → rename → přepnutí topicu (jen přesun) →
-  # politika cílové dvojice + upozornění → CODEOWNERS a webhook pod novým
-  # jménem (i archivované repo – je dočasně dearchivované; selhání = jen text
-  # v summary) → (zrušení
+  # politika cílové dvojice + upozornění → CODEOWNERS, webhook, soubory
+  # workflow a příznaky repa pod novým jménem (i archivované repo – je dočasně
+  # dearchivované; selhání = jen text v summary) → (zrušení
   # redirectu) → (zpětná archivace) → přesun ukazatele state/ a řádku
   # manifestu jedním commitem.
   # Idempotentní: navazuje na rozpracovaný stav (detect). Nameref summary
   # naplní podklady pro komentář/summary (_gh-governance-move-comment; klíč
-  # op = move|rename řídí texty; klíče codeowners a webhook = řádky poznámek,
-  # vždy neprázdné); klíč error_type nese typ validačního odmítnutí (jinak
-  # provozní chyba).
+  # op = move|rename řídí texty; klíče codeowners, webhook, workflows
+  # a repo_flags = řádky poznámek, vždy neprázdné); klíč error_type nese typ
+  # validačního odmítnutí (jinak provozní chyba).
   # Použití: local -A _s=(); _gh-governance-move-run <srcKey> <srcName> <dstKey> <dstName> <keep|cancel> _s
   local _src="$1" _src_name="$2" _dst="$3" _dst_name="$4" _redirect="$5"
   declare -n _sum_ref="$6"
   local _state="" _archived="" _error="" _old_name _new_name _new_path _branch
   local _op=move _op_txt="přesunu" _run_sha _adopted=false _removed_login=""
   local _delete_issue="" _redirect_result="" _pointer="" _co_note=""
-  local _wh_note="" _old_wh_url=""
+  local _wh_note="" _old_wh_url="" _wf_note="" _rf_note=""
   local -a _removed=()
   local -A _info=() _warn=()
   case "$_redirect" in
@@ -473,6 +474,13 @@ _gh-governance-move-run() {
     webhook_url _old_wh_url 2>/dev/null || _old_wh_url=""
   _gh-governance-webhook-apply-note "$_new_name" "$_dst" "${_info[topics]}" \
     "$_pointer" _wh_note "$_old_wh_url"
+  # Soubory workflow a příznaky repa dle efektivní konfigurace cílové dvojice
+  # (soubory šablon mimo klíč cíle uklidí tentýž průchod jako osiřelé; bez
+  # placeholderů je obsah stejný, typicky beze změny).
+  _gh-governance-workflows-apply-note "$_new_name" "$_branch" "$_dst" \
+    "${_info[topics]}" "$_pointer" _wf_note
+  _gh-governance-repo-flags-apply-note "$_new_name" "$_dst" "${_info[topics]}" \
+    "$_pointer" _rf_note
   if [[ "$_redirect" == cancel ]]; then
     # I při dokončování (half/done) – zrušení redirectu mohlo v minulém běhu
     # selhat; existující repo i chybějící redirect funkce sama idempotentně
@@ -501,11 +509,13 @@ _gh-governance-move-run() {
   _sum_ref[warn_collaborators]="${_warn[collaborators]}"
   _sum_ref[codeowners]="$_co_note"
   _sum_ref[webhook]="$_wh_note"
+  _sum_ref[workflows]="$_wf_note"
+  _sum_ref[repo_flags]="$_rf_note"
   [[ ${#_removed[@]} -gt 0 ]] && \
     printf 'Odebrán tým dle diffu konfigurace: %s\n' "${_removed[@]}"
   [[ -n "$_removed_login" ]] && \
     echo "Odebrán Jenkins collaborator '$_removed_login' dle diffu konfigurace."
-  printf '%s\n' "$_co_note" "$_wh_note"
+  printf '%s\n' "$_co_note" "$_wh_note" "$_wf_note" "$_rf_note"
   if [[ "$_op" == rename ]]; then
     echo "Hotovo: repo přejmenováno na '$_new_name' ('$_new_path')."
   else
@@ -642,7 +652,7 @@ _gh-governance-move-comment() {
   # reconcile warningů; operace je neměnila, repo si je nese s sebou). Texty
   # se řídí klíčem op (move = přesun mezi projekty, rename = přejmenování).
   # Použití: _gh-governance-move-comment <summary_assoc_name>
-  local _line _rename=false _op_txt="přesun" _op_neg="neměnil"
+  local _line _nk _rename=false _op_txt="přesun" _op_neg="neměnil"
   declare -n _c_ref="$1"
   [[ "${_c_ref[op]:-move}" == rename ]] && { _rename=true; _op_txt="přejmenování"; _op_neg="neměnilo"; }
   if [[ "$_rename" == true ]]; then
@@ -657,18 +667,15 @@ _gh-governance-move-comment() {
   else
     echo "- politika cílového projektu aplikována (týmy: \`${_c_ref[expected_teams]}\`; rulesety: \`${_c_ref[rulesets]}\`; property MHN: \`${_c_ref[mhn]}\`)"
   fi
-  # Řádky poznámek CODEOWNERS a webhooku (summary klíče codeowners, webhook;
-  # `:-` – testy plní summary ručně).
-  if [[ -n "${_c_ref[codeowners]:-}" ]]; then
+  # Řádky poznámek CODEOWNERS, webhooku, souborů workflow a příznaků repa
+  # (summary klíče codeowners, webhook, workflows, repo_flags – v tomto
+  # pořadí, řádek za řádek; `:-` – testy plní summary ručně).
+  for _nk in codeowners webhook workflows repo_flags; do
+    [[ -n "${_c_ref[$_nk]:-}" ]] || continue
     while IFS= read -r _line; do
       [[ -n "$_line" ]] && echo "- $_line"
-    done <<< "${_c_ref[codeowners]}"
-  fi
-  if [[ -n "${_c_ref[webhook]:-}" ]]; then
-    while IFS= read -r _line; do
-      [[ -n "$_line" ]] && echo "- $_line"
-    done <<< "${_c_ref[webhook]}"
-  fi
+    done <<< "${_c_ref[$_nk]}"
+  done
   _gh-governance-move-comment-settings _c_ref
   if [[ -n "${_c_ref[removed_teams]}" ]]; then
     while IFS= read -r _line; do

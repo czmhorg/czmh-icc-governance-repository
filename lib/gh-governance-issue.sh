@@ -218,7 +218,8 @@ _gh-governance-issue-parse-step-repo-sync() {
   # jediný řádek project_key=<ghProjectKey> – a zapíše výstupy do
   # $GITHUB_OUTPUT (result=ok + issue_number, project_key; nebo
   # result=rejected). Bez týmové autorizace autora (jako track-delete): sync
-  # jen konverguje CODEOWNERS a webhook rep projektu k conf.d. Typy odmítnutí:
+  # jen konverguje CODEOWNERS, webhook, soubory workflow a příznaky rep projektu
+  # k conf.d. Typy odmítnutí:
   # invalid_login, unexpected_line, duplicate_key, missing_key,
   # invalid_project_key, unknown_project. Odmítnutí okomentuje a zavře issue
   # not_planned a skončí úspěšně (rc 0); rc != 0 jen interní chyba.
@@ -251,7 +252,7 @@ _gh-governance-issue-parse-step-repo-sync() {
     echo "issue_number=$_number"
     echo "project_key=$_key"
   } >> "$_out"
-  echo "Issue #$_number přijato: repo-sync projektu $_key (CODEOWNERS a webhook)."
+  echo "Issue #$_number přijato: repo-sync projektu $_key (CODEOWNERS, webhook, workflow a příznaky repa)."
 }
 
 _gh-governance-issue-body-collect() {

@@ -237,11 +237,27 @@ _gh-profile-requires-pr() {
 # permission Members: write / classic scope admin:org) nebo gov-init pod
 # správcem; jiný účet dostane
 # hlášku. Cache v paměti běhu: jeden lookup a jeden pokus o založení na tým.
+# Proměnné jsou globální v shellu — u sourcovaných funkcí (bb-migrate,
+# bb-audit) by přežily do dalšího volání v témže okně, a uložená hláška
+# „neexistuje" by platila i po ručním založení týmu; vstupní body je proto
+# na začátku běhu vyprázdní přes _gh-bypass-team-cache-reset.
 declare -gA _GH_BYPASS_TEAM_ID_CACHE=()    # slug → id týmu
 declare -gA _GH_BYPASS_TEAM_DESC_CACHE=()  # slug → popis (z téhož GET, kontrola v reconcile)
 declare -gA _GH_BYPASS_TEAM_FAILED=()      # slug → hláška selhání (bez opakování API)
 declare -gA _GH_BYPASS_TEAM_CREATED=()     # slug → login (info položka reportu)
 _GH_AUTH_LOGIN_CACHE=""
+
+_gh-bypass-team-cache-reset() {
+  # Vyprázdní cache bypass týmů a přihlášeného účtu gh — začátek každého
+  # běhu sourcované funkce (bb-migrate.sh: _bb-migration-cleanup-reset), aby
+  # „jeden pokus za běh" platil za běh, ne za session shellu (tým založený
+  # ručně mezi běhy, gh auth switch). Bez volání API; workflows a skripty
+  # tools/ startují v novém procesu a reset nepotřebují.
+  # Použití: _gh-bypass-team-cache-reset
+  _GH_BYPASS_TEAM_ID_CACHE=(); _GH_BYPASS_TEAM_DESC_CACHE=()
+  _GH_BYPASS_TEAM_FAILED=(); _GH_BYPASS_TEAM_CREATED=()
+  _GH_AUTH_LOGIN_CACHE=""
+}
 
 _gh-bypass-team-slug() {
   # Slug bypass týmu účtu: <GH_BYPASS_TEAM_PREFIX><login> (login malými písmeny).

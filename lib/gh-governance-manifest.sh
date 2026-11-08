@@ -134,8 +134,8 @@ _gh-governance-manifest-rebuild() {
   _new_sorted=$(mktemp) || { rm -f "$_new" "$_old_sorted"; return 1; }
   [[ -f "$_file" ]] && LC_ALL=C sort "$_file" > "$_old_sorted"
   LC_ALL=C sort "$_new" > "$_new_sorted"
-  _added_ref=$(comm -13 "$_old_sorted" "$_new_sorted" | grep -c . || true)
-  _removed_ref=$(comm -23 "$_old_sorted" "$_new_sorted" | grep -c . || true)
+  _added_ref=$(LC_ALL=C comm -13 "$_old_sorted" "$_new_sorted" | grep -c . || true)
+  _removed_ref=$(LC_ALL=C comm -23 "$_old_sorted" "$_new_sorted" | grep -c . || true)
   rm -f "$_old_sorted" "$_new_sorted"
 
   if ! _gh-governance-manifest-write-atomic < "$_new"; then

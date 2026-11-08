@@ -198,6 +198,23 @@ _gh-governance-conf-effective-at-commit() {
   return 0
 }
 
+_gh-governance-conf-field-unchanged() {
+  # rc 0 ⇔ efektivní hodnota pole repa ve verzi konfigurace na SHA ukazatele
+  # je shodná s <hodnota> (aktuální efektivní hodnotou) — společná heuristika
+  # modulů „ruční zásah v GH“ (warning) vs. „legitimní změna conf.d“ (info):
+  # lišil-li se stav repa, ačkoli konfigurace od ukazatele dává totéž, změnil
+  # ho někdo v GitHubu. Prázdné SHA (adopce) nebo chyba čtení = neprokázáno
+  # (rc 1 → info). Porovnává surové hodnoty (prázdná na obou stranách = shoda);
+  # pole s normalizací (webhook_events) si volající porovná sám.
+  # Používají: webhook (webhook_url), příznaky repa (allow_auto_merge,
+  # actions_create_pr).
+  # Použití: _gh-governance-conf-field-unchanged <sha> <projectKey> <ghName> <pole> <hodnota>
+  local _old=""
+  [[ -n "$1" ]] || return 1
+  _gh-governance-conf-effective-at-commit "$1" "$2" "$3" "$4" _old 2>/dev/null || return 1
+  [[ "$_old" == "$5" ]]
+}
+
 _gh-governance-conf-domain-at-commit() {
   # Vypíše klíč domain projektu ve verzi commitu (prázdné = projekt v té
   # verzi neexistoval). rc 0 = OK, 2 = chyba (git/parsování).
