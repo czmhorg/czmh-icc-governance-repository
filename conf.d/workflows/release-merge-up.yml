@@ -5,6 +5,7 @@
 # PR se sloučí rovnou. Vyžaduje příznaky repa allow_auto_merge=true
 # a actions_create_pr=true (klíče projektu vedle klíče workflows). Používá
 # jen GITHUB_TOKEN; merge tímto tokenem nespouští další workflows.
+# Revize šablony 2026-11-08 (plán workflows rep, krok 9.6): komentář bez vlivu na chování.
 name: "release-merge-up (governance): merge release do vyšších release větví a develop"
 
 on:
