@@ -3,8 +3,8 @@ divoke	govtest1	false
 multi	govtest1	false
 pata-app	govtest1	false
 wf-a	govtest1	false
-wf-b	govtest1	false
 adopt	govtest2	false
 druha-app	govtest2	false
 prvni-app	govtest2	false
 treti-app	govtest2	false
+wf-b	govtest2	false
