@@ -1,12 +1,12 @@
 # Šablona workflow governance (defs/defs.md: workflow repa). Po pushi do
-# release/* otevře PR do všech vyšších release/* a do develop (existuje-li)
-# a zapne auto-merge; merge chráněné větve dokončí GitHub po schválení dle
-# rulesetu. Na větvi bez ochrany auto-merge zapnout nejde (GraphQL chyba),
-# PR se sloučí rovnou. Vyžaduje příznaky repa allow_auto_merge=true
-# a actions_create_pr=true (klíče projektu vedle klíče workflows). Používá
-# jen GITHUB_TOKEN; merge tímto tokenem nespouští další workflows.
-# Revize šablony 2026-11-08 (plán workflows rep, krok 9.6): komentář bez vlivu na chování.
-name: "release-merge-up (governance): merge release do vyšších release větví a develop"
+# release/* otevře PR do všech vyšších release/* a do výchozí větve repa
+# (default_branch z payloadu události) a zapne auto-merge; merge chráněné
+# větve dokončí GitHub po schválení dle rulesetu. Na větvi bez ochrany
+# auto-merge zapnout nejde (GraphQL chyba), PR se sloučí rovnou. Vyžaduje
+# příznaky repa allow_auto_merge=true a actions_create_pr=true (klíče projektu
+# vedle klíče workflows). Používá jen GITHUB_TOKEN; merge tímto tokenem
+# nespouští další workflows.
+name: "release-merge-up (governance): merge release do vyšších release větví a výchozí větve"
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
   merge-up:
     runs-on: ubuntu-latest
     steps:
-      - name: Otevřít PR do vyšších release větví a develop, zapnout auto-merge
+      - name: Otevřít PR do vyšších release větví a výchozí větve, zapnout auto-merge
         shell: bash
         env:
           # gh čte token podle hostu: github.com z GH_TOKEN, GHES
@@ -29,16 +29,19 @@ jobs:
           GH_ENTERPRISE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           export GH_HOST="${GITHUB_SERVER_URL#https://}"
           branches=$(gh api --paginate "repos/$GH_REPO/branches?per_page=100" --jq '.[].name')
-          # Cíle = vyšší release/* (sort -V: release/1.10 > release/1.9) + develop, existuje-li.
+          # Cíle = vyšší release/* (sort -V: release/1.10 > release/1.9) + výchozí větev repa,
+          # není-li pushnutou větví a není-li už mezi nimi (výchozí větev může být sama release/*).
           targets=$(grep '^release/' <<< "$branches" | sort -V \
             | awk -v cur="$BRANCH" 'f{print} $0==cur{f=1}')
-          if grep -qx develop <<< "$branches"; then
-            targets="${targets:+$targets$'\n'}develop"
+          if [ -n "$DEFAULT_BRANCH" ] && [ "$DEFAULT_BRANCH" != "$BRANCH" ] \
+              && ! grep -qxF -- "$DEFAULT_BRANCH" <<< "$targets"; then
+            targets="${targets:+$targets$'\n'}$DEFAULT_BRANCH"
           fi
-          [ -n "$targets" ] || { echo "Žádná vyšší release větev ani develop – nic k otevření."; exit 0; }
+          [ -n "$targets" ] || { echo "Žádná vyšší release větev ani výchozí větev ($DEFAULT_BRANCH) – nic k otevření."; exit 0; }
           while IFS= read -r target; do
             [ -n "$target" ] || continue
             echo "Cílová větev: $target"
