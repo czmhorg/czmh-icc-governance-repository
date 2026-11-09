@@ -2,7 +2,7 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
 # Správa příznaků repa spravovaných rep podle klíčů allow_auto_merge
-# a actions_create_pr (defs/defs.md: priznaky repa; docs/navrh/workflows-rep.md).
+# a actions_create_pr (defs/defs.md: priznaky repa; docs/implementovano/navrh/workflows-rep.md).
 # Příznak repa = nastavení GitHub repa (ne soubor v repu): allow_auto_merge
 # (GET/PATCH repos/{r}) a actions_create_pr (GET/PUT
 # repos/{r}/actions/permissions/workflow; default_workflow_permissions se

@@ -3,12 +3,15 @@
 
 # Sdílené helpery pro generovaný obsah ve spravovaných repech
 # (defs/defs-governance-repo.md: generovany obsah ve spravovanych repech):
-# Contents API — čtení, zápis a smazání jednoho souboru (jeden commit do zadané
-# větve, bez klonu), výpis adresáře — blob SHA lokálního obsahu pro porovnání
-# bez stahování a expanze placeholderů šablon ({{NÁZEV}}). Volají je
+# Contents API — čtení (volitelně přesné včetně koncových \n — kopie blobu),
+# zápis a smazání jednoho souboru (jeden commit do zadané větve, bez klonu),
+# výpis adresáře — blob SHA lokálního obsahu pro porovnání bez stahování
+# a expanze placeholderů šablon ({{NÁZEV}}). Volají je
 # lib/gh-governance-codeowners.sh (.github/CODEOWNERS,
-# CODEOWNERS_README.md) a lib/gh-governance-workflows.sh (soubory
-# .github/workflows/<GH_WORKFLOW_PREFIX>-*.yml). Rozhodovací logika zůstává
+# CODEOWNERS_README.md), lib/gh-governance-workflows.sh (soubory
+# .github/workflows/<GH_WORKFLOW_PREFIX>-*.yml) a tool
+# tools/copy-workflows-to-release-branches.sh (kopie souborů workflow
+# z výchozí větve do větví release/*, čtení `exact`). Rozhodovací logika zůstává
 # v modulech — zde jen volání API; testy modulů tyto funkce přepisují jménem
 # (vlastní testy: tests/test-gh-governance-contents.sh). Přes rulesety projde
 # bot díky svému bypass týmu (defs/defs.md: bypass tym); zápis do
@@ -19,6 +22,12 @@
 [[ -n "${_GH_GOVERNANCE_CONTENTS_LOADED:-}" ]] && \
   declare -F _gh-governance-contents-read >/dev/null && return 0
 _GH_GOVERNANCE_CONTENTS_LOADED=1
+
+# Adresář souborů workflow ve spravovaném repu (defs/defs.md: workflow repa).
+# Sdílí ho správa workflow (lib/gh-governance-workflows.sh) a tool
+# copy-workflows-to-release-branches.sh — proto je zde, ne v modulu workflow
+# s těžkými závislostmi.
+_GH_GOVERNANCE_WORKFLOWS_DIR='.github/workflows'
 
 _gh-governance-contents-api-error() {
   # Společné vyhodnocení selhání `gh api` ze souboru se stderr: rc 1 = HTTP 404
@@ -41,9 +50,12 @@ _gh-governance-contents-read() {
   # místo souboru — odpověď je pole, výraz jq selže). Kontrakt obsahu:
   # koncové \n jsou ořezané (command substitution) — volající porovnávají
   # obsah bez koncového \n a při zápisu ho doplňují (codeowners); porovnání
-  # celého souboru bajt po bajtu jde přes blob SHA z -dir-list.
+  # celého souboru bajt po bajtu jde přes blob SHA z -dir-list. S 6. argumentem
+  # `exact` zůstane obsah přesný včetně koncových \n (sentinel za base64 -d) —
+  # pro kopii blobu beze změny; _gh-governance-blob-sha nad ním dává sha
+  # z odpovědi.
   # Použití: _gh-governance-contents-read <repoPath> <cesta> <branch>
-  #          <content_ref> <sha_ref>
+  #          <content_ref> <sha_ref> [exact]
   declare -n _fr_content="$4" _fr_sha="$5"
   local _resp _err_file
   _fr_content=""; _fr_sha=""
@@ -56,7 +68,12 @@ _gh-governance-contents-read() {
   fi
   rm -f "$_err_file"
   _fr_sha="${_resp%%$'\t'*}"
-  _fr_content=$(printf '%s' "${_resp#*$'\t'}" | base64 -d) || return 2
+  if [[ "${6:-}" == exact ]]; then
+    _fr_content=$(printf '%s' "${_resp#*$'\t'}" | base64 -d && printf x) || return 2
+    _fr_content="${_fr_content%x}"
+  else
+    _fr_content=$(printf '%s' "${_resp#*$'\t'}" | base64 -d) || return 2
+  fi
   return 0
 }
 

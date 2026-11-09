@@ -2,7 +2,7 @@
 # GENEROVANO gov-sync.sh -- needitovat v gov repu
 
 # Správa souborů workflow spravovaných rep podle efektivního klíče workflows
-# (defs/defs.md: workflow repa, sablona workflow; docs/navrh/workflows-rep.md).
+# (defs/defs.md: workflow repa, sablona workflow; docs/implementovano/navrh/workflows-rep.md).
 # Cílový stav repa = za každou položku klíče soubor
 # .github/workflows/<GH_WORKFLOW_PREFIX>-<název>.yml ve výchozí větvi s hlavičkou
 # GENEROVANO, řádkem zdroje a expandovanou šablonou conf.d/workflows/<název>.yml
@@ -23,7 +23,8 @@
 # Závislosti: gh-common-defs.sh (_require_vars, GH_WORKFLOW_PREFIX,
 # GH_REPO_PREFIX, GITHUB_ORG, GITHUB_ORG_HOSTNAME, GH_GOVERNANCE_REPO, topic
 # migrace), lib/gh-conf.sh (_gh-conf-workflows), lib/gh-governance-contents.sh
-# (_gh-governance-contents-dir-list/-read/-write/-delete, _gh-governance-blob-sha),
+# (_gh-governance-contents-dir-list/-read/-write/-delete, _gh-governance-blob-sha,
+# _GH_GOVERNANCE_WORKFLOWS_DIR),
 # lib/gh-governance-report.sh (_gh-governance-report-add, _gh-governance-apply-note),
 # lib/gh-governance-state.sh (_gh-governance-checkout-root), git (šablona na
 # SHA ukazatele přes git show), sort (řazení plánu; mimo load path).
@@ -38,8 +39,8 @@ _GH_GOVERNANCE_WORKFLOWS_LOADED=1
 _GH_GOVERNANCE_WORKFLOW_HEADER='# GENEROVANO reconcile -- needitovat, prepise kazdy beh'
 # Druhý řádek (printf formát): šablona, gov repo <org>/<repo>, projekt.
 _GH_GOVERNANCE_WORKFLOW_SOURCE_FMT='# zdroj: conf.d/workflows/%s.yml v gov repu %s (klic workflows projektu %s)'
-# Adresář souborů workflow v repu a šablon v checkoutu gov repa.
-_GH_GOVERNANCE_WORKFLOWS_DIR='.github/workflows'
+# Adresář šablon v checkoutu gov repa; adresář souborů workflow v repu je
+# _GH_GOVERNANCE_WORKFLOWS_DIR z lib/gh-governance-contents.sh (sdílený s tooly).
 _GH_GOVERNANCE_WORKFLOW_TEMPLATES_DIR='conf.d/workflows'
 
 _gh-governance-workflow-file() {

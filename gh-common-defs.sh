@@ -614,6 +614,20 @@ _bb-require-gh-token() {
   fi
 }
 
+_gh-confirm() {
+  # Sdílený potvrzovací dotaz [Y/N] uživatelských funkcí (gh-functions-user.sh)
+  # i toolů ve tools/ (ty gh-functions-user.sh nenačítají — proto je zde).
+  # skip_confirm=true (přepínač --yes) = souhlas bez čtení stdin; bez TTY
+  # (roura, EOF) read selže a prázdná odpověď = ne. Hlášku o zrušení
+  # („Akce zrušena.“) vypisuje volající. Vzor _bb-migration-confirm
+  # (bb-migrate si drží vlastní kvůli rc 2 bez TTY).
+  # Použití: _gh-confirm <otázka> [skip_confirm true|false]  → return 0 = ano, 1 = ne
+  local _question="$1" _skip="${2:-false}" _answer
+  [[ "$_skip" == true ]] && return 0
+  read -r -p "$_question [Y/N] " _answer || _answer=""
+  [[ "$_answer" =~ ^[Yy]$ ]]
+}
+
 _gh-workspace-map-error() {
   # Chyba položky mapování workspace jmenující položku; vrací 1.
   # Použití: _gh-workspace-map-error <klíč> <hodnota> <důvod>
